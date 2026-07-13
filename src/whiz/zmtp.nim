@@ -98,36 +98,63 @@ proc parseGreeting(buf: ptr UncheckedArray[byte]): tuple[ok: bool; mechanism: st
 # ── Frame I/O ────────────────────────────────────────────────────────────────
 
 proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
-  ## Send a ZMTP frame. The body is always copied into a local seq so that
-  ## the caller is free to reuse its buffer immediately after this returns.
+  ## Send a ZMTP frame. When mechEncrypt is nil the body is referenced
+  ## directly (zero-copy through the framing layer). When encryption is
+  ## active the body is copied, encrypted in-place, and the ciphertext is sent.
   if zc.conn == nil: return -1
-  var payload = @body
   if zc.mechEncrypt != nil:
+    var payload = @body
     if not zc.mechEncrypt(zc, payload): return -1
-  if payload.len <= 255:
-    var hdr: array[2, byte]
-    hdr[0] = flags
-    hdr[1] = byte(payload.len)
-    if payload.len > 0:
-      result = zc.conn.sendv([
-        (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
-        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
-      ])
+    if payload.len <= 255:
+      var hdr: array[2, byte]
+      hdr[0] = flags
+      hdr[1] = byte(payload.len)
+      if payload.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
+          (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
     else:
-      result = zc.conn.send(hdr)
+      var hdr: array[10, byte]
+      hdr[0] = flags or ZmtpLong
+      let blen = uint64(payload.len)
+      for i in 0 ..< 8:
+        hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+      if payload.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
+          (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
   else:
-    var hdr: array[10, byte]
-    hdr[0] = flags or ZmtpLong
-    let blen = uint64(payload.len)
-    for i in 0 ..< 8:
-      hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
-    if payload.len > 0:
-      result = zc.conn.sendv([
-        (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
-        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
-      ])
+    # Zero-copy path — reference body directly
+    if body.len <= 255:
+      var hdr: array[2, byte]
+      hdr[0] = flags
+      hdr[1] = byte(body.len)
+      if body.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
+          (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
     else:
-      result = zc.conn.send(hdr)
+      var hdr: array[10, byte]
+      hdr[0] = flags or ZmtpLong
+      let blen = uint64(body.len)
+      for i in 0 ..< 8:
+        hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+      if body.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
+          (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
 
 proc sendCommand*(zc: ZmtpConnection; name: string; data: openArray[byte] = @[]): int =
   var body = newSeq[byte](name.len + 1 + data.len)
@@ -208,21 +235,22 @@ proc handleCommand(zc: ZmtpConnection; buf: ptr byte; size: int) =
       zc.state = ZmtpEstablished
       if zc.onReady != nil: zc.onReady(zc)
   of "SUBSCRIBE":
-    if dataLen >= 1 and d[nullPos + 1] == 1:
-      var topic: seq[byte]
+    if dataLen >= 1 and d[nullPos + 1] == 1 and zc.onSubscribe != nil:
+      var zc2 = zc
       if dataLen > 1:
-        topic = newSeq[byte](dataLen - 1)
+        var topic = newSeq[byte](dataLen - 1)
         copyMem(addr topic[0], addr d[nullPos + 2], dataLen - 1)
-      if zc.onSubscribe != nil:
-        var zc2 = zc
         zc2.onSubscribe(zc2, topic)
+      else:
+        zc2.onSubscribe(zc2, @[])
   of "UNSUBSCRIBE":
-    if dataLen >= 1 and d[nullPos + 1] == 0:
-      var topic: seq[byte]
+    if dataLen >= 1 and d[nullPos + 1] == 0 and zc.onUnsubscribe != nil:
       if dataLen > 1:
-        topic = newSeq[byte](dataLen - 1)
+        var topic = newSeq[byte](dataLen - 1)
         copyMem(addr topic[0], addr d[nullPos + 2], dataLen - 1)
-      if zc.onUnsubscribe != nil: zc.onUnsubscribe(zc, topic)
+        zc.onUnsubscribe(zc, topic)
+      else:
+        zc.onUnsubscribe(zc, @[])
   of "ERROR":
     if dataLen > 0:
       let reason = cast[string](newString(dataLen))
@@ -248,15 +276,14 @@ proc readFrame(zc: ZmtpConnection; buf: ptr byte; rlen: int): tuple[ok: bool; fl
 
 proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
   if zc.state == ZmtpClosed: return
-  let writePos = zc.recvOff + zc.recvLen
-  let spaceAtEnd = zc.recvBuf.len - writePos
-  if data.len > spaceAtEnd:
-    if zc.recvOff + zc.recvLen + data.len <= zc.recvBuf.len:
+  if zc.recvOff > 0:
+    if zc.recvLen > 0:
       copyMem(addr zc.recvBuf[0], addr zc.recvBuf[zc.recvOff], zc.recvLen)
-      zc.recvOff = 0
-    else:
-      zc.recvBuf.setLen(writePos + data.len)
-  copyMem(addr zc.recvBuf[zc.recvOff + zc.recvLen], unsafeAddr data[0], data.len)
+    zc.recvOff = 0
+  let spaceAtEnd = zc.recvBuf.len - zc.recvLen
+  if data.len > spaceAtEnd:
+    zc.recvBuf.setLen(zc.recvLen + data.len)
+  copyMem(addr zc.recvBuf[zc.recvLen], unsafeAddr data[0], data.len)
   zc.recvLen += data.len
 
   var done = false
