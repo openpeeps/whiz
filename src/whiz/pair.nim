@@ -1,29 +1,17 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## Exclusive PAIR socket pattern — one-to-one bidirectional communication.
-##
-## PAIR sockets provide a strict one-to-one connection between two peers.
-## The server rejects any further connection attempts after the first peer
-## is accepted. The communication is bidirectional and stateless.
-##
-## Usage:
-##   ```nim
-##   let loop = newLoop()
-##
-##   # Server side
-##   let srv = newPairSocket(loop)
-##   srv.bind("127.0.0.1", 5555)
-##   srv.onMessage = proc(data: string) {.closure.} =
-##     echo "received: ", data
-##
-##   # Client side
-##   let cli = newPairSocket(loop)
-##   cli.connect("127.0.0.1", 5555)
-##   cli.send("hello")
-##   ```
 
 import powpow/[loop, types, net/tcp]
 import ./zmtp
+import ./auth
+import ./curve
 
-export loop, types, tcp, zmtp
+export loop, types, tcp, zmtp, auth, curve
 
 type
   PairSocket* = ref object
@@ -32,6 +20,39 @@ type
     conn*:       ZmtpConnection
     onMessage*: proc(data: openArray[byte]) {.closure.}
     onClose*:   proc() {.closure.}
+    authMech:   string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
+    authUser, authPass: string
+    authZapHandler: ZapHandler
+
+proc setCurveKeypair*(pair: PairSocket; publicKey, secretKey: array[32, uint8]) =
+  pair.authMech = "CURVE"
+  pair.authPubKey = publicKey
+  pair.authSecKey = secretKey
+
+proc setCurveClient*(pair: PairSocket; publicKey, secretKey, serverKey: array[32, uint8]) =
+  pair.authMech = "CURVE"
+  pair.authPubKey = publicKey
+  pair.authSecKey = secretKey
+  pair.authSrvKey = serverKey
+
+proc setPlainAuth*(pair: PairSocket; username, password: string) =
+  pair.authMech = "PLAIN"
+  pair.authUser = username
+  pair.authPass = password
+
+proc onAuthenticate*(pair: PairSocket; handler: ZapHandler) =
+  pair.authZapHandler = handler
+
+proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
+  if pair.authMech == "PLAIN":
+    auth.setPlainAuth(zc, pair.authUser, pair.authPass)
+    if pair.authZapHandler != nil:
+      auth.onAuthenticate(zc, pair.authZapHandler)
+  elif pair.authMech == "CURVE":
+    curve.setCurveKeypair(zc, pair.authPubKey, pair.authSecKey)
+    if pair.authSrvKey != default(array[32, uint8]):
+      curve.setCurveServerKey(zc, pair.authSrvKey)
 
 proc newPairSocket*(loop: Loop): PairSocket =
   PairSocket(loop: loop)
@@ -59,17 +80,18 @@ proc `bind`*(pair: PairSocket; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = true)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
-    ps.conn = zc  # Keep GC reference alive
+    ps.conn = zc
+    applySocketAuth(zc, ps)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "PAIR":
         discard zc.sendCommand("ERROR", "Invalid socket type: " & zc.peerSocketType)
         zc.close()
         return
-      # Connection established and handshake complete
 
     zc.onMessage = proc(zc: ZmtpConnection; data: openArray[byte]) =
       if ps.onMessage != nil:
@@ -94,10 +116,12 @@ proc connect*(pair: PairSocket; address: string; port: int = 0;
   let ps = pair
 
   proc setupConn(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = false)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
     ps.conn = zc
+    applySocketAuth(zc, ps)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "PAIR":

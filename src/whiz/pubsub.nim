@@ -1,35 +1,18 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## Publish-Subscribe messaging built on ZMTP 3.0 and powpow TCP.
-##
-## Provides PUB (publisher) and SUB (subscriber) socket types
-## compatible with ZeroMQ's pub-sub pattern:
-##
-##   - PUB socket binds, accepts connections from SUB peers
-##   - SUB socket connects to PUB peers, sends topic subscriptions
-##   - Messages are prefix-matched against subscriber topics
-##   - Filtering happens at the publisher side
-##
-## Also provides in-process pub/sub via TopicHub for same-process
-## message passing without TCP overhead.
-##
-## Usage:
-##   ```nim
-##   # Publisher
-##   let pub = newPubSocket(loop, "0.0.0.0", 5555)
-##   pub.publish("weather", "sunny")
-##
-##   # Subscriber
-##   let sub = newSubSocket(loop)
-##   sub.connect("127.0.0.1", 5555)
-##   sub.subscribe("weather")
-##   sub.onMessage = proc(topic, data: string) {.closure.} =
-##     echo topic, ": ", data
-##   ```
 
 import std/[tables, sequtils, strutils]
 import powpow/[loop, types, net/tcp]
 import ./zmtp
+import ./auth
+import ./curve
 
-export tcp, loop, types, zmtp
+export tcp, loop, types, zmtp, auth, curve
 
 # ── TopicHub (in-process pub/sub) ──────────────────────────────────────────
 
@@ -74,6 +57,8 @@ type
     loop: Loop
     server: TcpServer
     subs: seq[Subscriber]
+    authMech: string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
 
   SubSocket* = ref object
     loop: Loop
@@ -81,6 +66,19 @@ type
     subscriptions: seq[string]
     onMessage*: proc(topic: openArray[byte]; data: openArray[byte]) {.closure.}
     onClose*: proc() {.closure.}
+    authMech: string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
+
+proc setCurveKeypair*(pub: PubSocket; publicKey, secretKey: array[32, uint8]) =
+  pub.authMech = "CURVE"
+  pub.authPubKey = publicKey
+  pub.authSecKey = secretKey
+
+proc setCurveClient*(sub: SubSocket; publicKey, secretKey, serverKey: array[32, uint8]) =
+  sub.authMech = "CURVE"
+  sub.authPubKey = publicKey
+  sub.authSecKey = secretKey
+  sub.authSrvKey = serverKey
 
 # ── PubSocket ────────────────────────────────────────────────────────────────
 
@@ -94,9 +92,12 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = true)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PUB"
     conn.data = cast[pointer](zc)
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
     var sub = Subscriber(zc: zc, topics: @[])
 
     zc.onReady = proc(zc: ZmtpConnection) =
@@ -153,9 +154,14 @@ proc newSubSocket*(loop: Loop): SubSocket =
 proc connect*(sub: SubSocket; address: string; port: int = 0;
               transport: Transport = TransportTcp) =
   proc onConnect(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = false)
+    let mech = if sub.authMech.len > 0: sub.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "SUB"
     conn.data = cast[pointer](zc)
+    if sub.authMech == "CURVE":
+      curve.setCurveKeypair(zc, sub.authPubKey, sub.authSecKey)
+      if sub.authSrvKey != default(array[32, uint8]):
+        curve.setCurveServerKey(zc, sub.authSrvKey)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "PUB":

@@ -1,3 +1,9 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## Chunked, flow-controlled file transfer over ZMTP.
 ##
 ## Receiver-driven pull flow control: sender sends FILE_INIT metadata,

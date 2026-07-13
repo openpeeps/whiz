@@ -1,10 +1,17 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## ZMTP 3.0 — ZeroMQ Message Transport Protocol implementation.
 ##
 ## Implements the wire protocol defined by RFC 23/ZMTP:
 ##   - 64-byte greeting exchange with version negotiation
 ##   - Short/long frame encoding (flags + size + body)
-##   - NULL security mechanism (READY/ERROR commands)
+##   - NULL, PLAIN, CURVE security mechanisms
 ##   - SUBSCRIBE/UNSUBSCRIBE command frames for PUB/SUB
+##   - Mechanism dispatch with encrypt/decrypt hooks
 ##
 ## Built on top of powpow's TCP Connection primitives.
 
@@ -37,6 +44,7 @@ const
 type
   ZmtpState* = enum
     ZmtpGreeting
+    ZmtpHandshake
     ZmtpReady
     ZmtpEstablished
     ZmtpClosed
@@ -48,6 +56,7 @@ type
     peerSocketType*: string
     identity*:    string
     mechanism*:   string
+    asServer*:    bool
     recvBuf:      seq[byte]
     recvOff:      int
     recvLen:      int
@@ -57,16 +66,21 @@ type
     onUnsubscribe*: proc(zc: ZmtpConnection; topic: openArray[byte]) {.closure.}
     onError*:     proc(zc: ZmtpConnection; reason: string) {.closure.}
     onClose*:     proc(zc: ZmtpConnection) {.closure.}
+    # Mechanism dispatch
+    mechHandshake*: proc(zc: ZmtpConnection; body: openArray[byte]): bool {.closure.}
+    mechEncrypt*: proc(zc: ZmtpConnection; data: var seq[byte]): bool {.closure.}
+    mechDecrypt*: proc(zc: ZmtpConnection; data: var seq[byte]): bool {.closure.}
+    mechDestroy*: proc(zc: ZmtpConnection) {.closure.}
+    mechData*:     RootRef  # mechanism-specific state
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
 
-proc buildGreeting*(asServer: bool): array[64, byte] =
+proc buildGreeting*(asServer: bool; mechanism: string = "NULL"): array[64, byte] =
   result[0] = ZmtpSignature
   result[9] = ZmtpMarker
   result[10] = ZmtpMajor
   result[11] = ZmtpMinor
-  let mech = "NULL"
-  for i, c in mech: result[12 + i] = byte(c)
+  for i, c in mechanism: result[12 + i] = byte(c)
   result[32] = byte(asServer.ord)
 
 proc parseGreeting(buf: ptr UncheckedArray[byte]): tuple[ok: bool; mechanism: string] =
@@ -85,27 +99,30 @@ proc parseGreeting(buf: ptr UncheckedArray[byte]): tuple[ok: bool; mechanism: st
 
 proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
   if zc.conn == nil: return -1
-  if body.len <= 255:
+  var payload = @body
+  if zc.mechEncrypt != nil:
+    if not zc.mechEncrypt(zc, payload): return -1
+  if payload.len <= 255:
     var hdr: array[2, byte]
     hdr[0] = flags
-    hdr[1] = byte(body.len)
-    if body.len > 0:
+    hdr[1] = byte(payload.len)
+    if payload.len > 0:
       result = zc.conn.sendv([
         (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
-        (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
       ])
     else:
       result = zc.conn.send(hdr)
   else:
     var hdr: array[10, byte]
     hdr[0] = flags or ZmtpLong
-    let blen = uint64(body.len)
+    let blen = uint64(payload.len)
     for i in 0 ..< 8:
       hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
-    if body.len > 0:
+    if payload.len > 0:
       result = zc.conn.sendv([
         (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
-        (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
       ])
     else:
       result = zc.conn.send(hdr)
@@ -139,6 +156,9 @@ proc sendMessage*(zc: ZmtpConnection; data: openArray[byte]) =
 proc close*(zc: ZmtpConnection) =
   if zc == nil: return
   zc.state = ZmtpClosed
+  if zc.mechDestroy != nil:
+    zc.mechDestroy(zc)
+    zc.mechDestroy = nil
   if zc.conn != nil:
     zc.conn.close()
 
@@ -168,7 +188,6 @@ proc parseReadyProps(zc: ZmtpConnection; buf: ptr byte; len: int) =
     elif propName == "Identity" and propValLen > 0:
       zc.identity = cast[string](newString(propValLen))
       copyMem(addr zc.identity[0], addr d[i], propValLen)
-    i += propValLen
 
 proc handleCommand(zc: ZmtpConnection; buf: ptr byte; size: int) =
   let d = cast[ptr UncheckedArray[byte]](buf)
@@ -247,15 +266,47 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
         done = true
       else:
         let (ok, mechanism) = parseGreeting(cast[ptr UncheckedArray[byte]](buf))
-        if not ok or mechanism != "NULL":
-          if zc.onError != nil: zc.onError(zc, "Invalid greeting")
+        if not ok:
+          if zc.onError != nil: zc.onError(zc, "Invalid greeting signature")
           zc.state = ZmtpClosed
           done = true
         else:
           zc.consume(64)
-          zc.state = ZmtpReady
-          if zc.socketType.len > 0:
-            zc.sendReady(zc.socketType)
+          zc.mechanism = mechanism
+          case mechanism
+          of "NULL":
+            zc.state = ZmtpReady
+            if zc.socketType.len > 0:
+              zc.sendReady(zc.socketType)
+          of "PLAIN":
+            zc.state = ZmtpReady
+            if not zc.asServer and zc.mechHandshake != nil:
+              discard zc.mechHandshake(zc, @[])
+          of "CURVE":
+            if zc.mechHandshake != nil:
+              zc.state = ZmtpHandshake
+              if not zc.asServer:
+                discard zc.mechHandshake(zc, @[])
+            else:
+              if zc.onError != nil: zc.onError(zc, "CURVE not configured on this peer")
+              zc.state = ZmtpClosed
+              done = true
+          else:
+            if zc.onError != nil: zc.onError(zc, "Unsupported mechanism: " & mechanism)
+            zc.state = ZmtpClosed
+            done = true
+
+    of ZmtpHandshake:
+      let (ok, flags, body, bodyLen, consumed) = readFrame(zc, buf, zc.recvLen)
+      if not ok:
+        done = true
+      elif (flags and ZmtpCommand) != 0:
+        if body != nil and bodyLen > 0:
+          if zc.mechHandshake != nil:
+            discard zc.mechHandshake(zc, cast[ptr UncheckedArray[byte]](body).toOpenArray(0, bodyLen - 1))
+        zc.consume(consumed)
+      else:
+        done = true
 
     of ZmtpReady:
       let (ok, flags, body, bodyLen, consumed) = readFrame(zc, buf, zc.recvLen)
@@ -264,8 +315,12 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
       elif (flags and ZmtpCommand) == 0:
         done = true
       else:
-        if body != nil and bodyLen > 0:
-          handleCommand(zc, body, bodyLen)
+        if zc.mechHandshake != nil:
+          if body != nil and bodyLen > 0:
+            discard zc.mechHandshake(zc, cast[ptr UncheckedArray[byte]](body).toOpenArray(0, bodyLen - 1))
+        else:
+          if body != nil and bodyLen > 0:
+            handleCommand(zc, body, bodyLen)
         zc.consume(consumed)
 
     of ZmtpEstablished:
@@ -278,8 +333,19 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
         zc.consume(consumed)
       else:
         if body != nil and bodyLen > 0:
-          if zc.onMessage != nil:
-            zc.onMessage(zc, cast[ptr UncheckedArray[byte]](body).toOpenArray(0, bodyLen - 1))
+          let raw = cast[ptr UncheckedArray[byte]](body)
+          if zc.mechDecrypt != nil:
+            var msg = newSeq[byte](bodyLen)
+            copyMem(addr msg[0], raw, bodyLen)
+            if not zc.mechDecrypt(zc, msg):
+              if zc.onError != nil: zc.onError(zc, "Decryption failed")
+              zc.state = ZmtpClosed
+              done = true
+            elif zc.onMessage != nil:
+              zc.onMessage(zc, msg)
+          else:
+            if zc.onMessage != nil:
+              zc.onMessage(zc, raw.toOpenArray(0, bodyLen - 1))
         zc.consume(consumed)
 
     of ZmtpClosed:
@@ -287,12 +353,13 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
 
 # ── Connection setup ─────────────────────────────────────────────────────────
 
-proc initZmtpConnection*(conn: Connection; asServer: bool): ZmtpConnection =
+proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "NULL"): ZmtpConnection =
   result = ZmtpConnection(
     conn: conn,
     state: ZmtpGreeting,
     recvBuf: newSeq[byte](4096),
-    mechanism: "NULL",
+    mechanism: mechanism,
+    asServer: asServer,
     recvOff: 0,
   )
-  discard result.conn.send(buildGreeting(asServer))
+  discard result.conn.send(buildGreeting(asServer, mechanism))

@@ -1,35 +1,18 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## PUSH/PULL — Pipeline socket pattern.
-##
-## PUSH distributes messages to connected PULL sockets using round-robin
-## scheduling. PULL receives messages from connected PUSH sockets using
-## fair-queuing (messages are interleaved from all connected peers).
-##
-## Usage:
-##   ```nim
-##   let loop = newLoop()
-##
-##   # Worker (PULL)
-##   let pull = newPullSocket(loop)
-##   pull.bind("127.0.0.1", 5555)
-##   pull.onMessage = proc(data: string) {.closure.} =
-##     echo "work: ", data
-##
-##   # Pusher (PUSH)
-##   let push = newPushSocket(loop)
-##   push.connect("127.0.0.1", 5555)
-##   push.send("task 1")
-##   push.send("task 2")
-##   ```
-##
-## Multiple PUSH senders and multiple PULL workers are supported.
-## Messages from a single PUSH are distributed round-robin across
-## connected PULL sockets on the send side.
 
 import std/[sequtils]
 import powpow/[loop, types, net/tcp]
 import ./zmtp
+import ./auth
+import ./curve
 
-export loop, types, tcp, zmtp
+export loop, types, tcp, zmtp, auth, curve
 
 type
   PushSocket* = ref object
@@ -38,6 +21,8 @@ type
     conns:      seq[ZmtpConnection]
     rrIndex:    int
     onClose*:   proc() {.closure.}
+    authMech:   string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
 
   PullSocket* = ref object
     loop:       Loop
@@ -45,6 +30,19 @@ type
     conns:      seq[ZmtpConnection]
     onMessage*: proc(data: openArray[byte]) {.closure.}
     onClose*:   proc() {.closure.}
+    authMech:   string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
+
+proc setCurveKeypair*(pull: PullSocket; publicKey, secretKey: array[32, uint8]) =
+  pull.authMech = "CURVE"
+  pull.authPubKey = publicKey
+  pull.authSecKey = secretKey
+
+proc setCurveClient*(push: PushSocket; publicKey, secretKey, serverKey: array[32, uint8]) =
+  push.authMech = "CURVE"
+  push.authPubKey = publicKey
+  push.authSecKey = secretKey
+  push.authSrvKey = serverKey
 
 # ── PushSocket ────────────────────────────────────────────────────────────────
 
@@ -78,9 +76,12 @@ proc `bind`*(push: PushSocket; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = true)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PUSH"
     conn.data = cast[pointer](zc)
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
     ps.conns.add(zc)
 
     zc.onReady = proc(zc: ZmtpConnection) =
@@ -109,9 +110,14 @@ proc connect*(push: PushSocket; address: string; port: int = 0;
   let ps = push
 
   proc onConnect(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = false)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PUSH"
     conn.data = cast[pointer](zc)
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.authSrvKey != default(array[32, uint8]):
+        curve.setCurveServerKey(zc, ps.authSrvKey)
     ps.conns.add(zc)
 
     zc.onReady = proc(zc: ZmtpConnection) =
@@ -150,9 +156,6 @@ proc newPullSocket*(loop: Loop): PullSocket =
   PullSocket(loop: loop, conns: @[])
 
 proc send*(pull: PullSocket; data: string) =
-  ## Send a message back to the most recent sender. In a standard PULL
-  ## socket this is atypical — PULL is receive-only — but we provide it
-  ## for symmetry and for pipeline patterns where workers need to reply.
   if pull.conns.len == 0: return
   let zc = pull.conns[^1]
   if zc.state == ZmtpEstablished:
@@ -176,9 +179,12 @@ proc `bind`*(pull: PullSocket; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = true)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PULL"
     conn.data = cast[pointer](zc)
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "PUSH":
@@ -212,9 +218,14 @@ proc connect*(pull: PullSocket; address: string; port: int = 0;
   let ps = pull
 
   proc onConnect(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = false)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PULL"
     conn.data = cast[pointer](zc)
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.authSrvKey != default(array[32, uint8]):
+        curve.setCurveServerKey(zc, ps.authSrvKey)
     ps.conns.add(zc)
 
     zc.onReady = proc(zc: ZmtpConnection) =

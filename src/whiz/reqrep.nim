@@ -1,48 +1,48 @@
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
 ## REQ/REP — Request-Reply socket pattern.
-##
-## Implements strict request-reply alternation per RFC 28/REQREP.
-## A REP socket binds and waits for requests. A REQ socket connects
-## and sends requests. Each REQ must receive a reply before sending
-## another request. Each REP must receive a request before sending a reply.
-##
-## Usage:
-##   ```nim
-##   let loop = newLoop()
-##
-##   # Server (REP)
-##   let rep = newRepSocket(loop)
-##   rep.bind("127.0.0.1", 5555)
-##   rep.onRequest = proc(data: string) {.closure.} =
-##     rep.send("echo: " & data)
-##
-##   # Client (REQ)
-##   let req = newReqSocket(loop)
-##   req.connect("127.0.0.1", 5555)
-##   req.onReply = proc(data: string) {.closure.} =
-##     echo "got: ", data
-##   req.send("hello")
-##   ```
 
 import powpow/[loop, types, net/tcp]
 import ./zmtp
+import ./auth
+import ./curve
 
-export loop, types, tcp, zmtp
+export loop, types, tcp, zmtp, auth, curve
 
 type
   ReqSocket* = ref object
     loop:       Loop
     conn:       ZmtpConnection
-    waiting:    bool             # true while awaiting a reply
+    waiting:    bool
     onReply*:   proc(data: openArray[byte]) {.closure.}
     onClose*:   proc() {.closure.}
+    authMech:   string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
 
   RepSocket* = ref object
     loop:       Loop
     conn:       ZmtpConnection
     server:     TcpServer
-    hasRequest: bool             # true while processing a request
+    hasRequest: bool
     onRequest*: proc(data: openArray[byte]) {.closure.}
     onClose*:   proc() {.closure.}
+    authMech:   string
+    authPubKey, authSecKey, authSrvKey: array[32, uint8]
+
+proc setCurveKeypair*(rep: RepSocket; publicKey, secretKey: array[32, uint8]) =
+  rep.authMech = "CURVE"
+  rep.authPubKey = publicKey
+  rep.authSecKey = secretKey
+
+proc setCurveClient*(req: ReqSocket; publicKey, secretKey, serverKey: array[32, uint8]) =
+  req.authMech = "CURVE"
+  req.authPubKey = publicKey
+  req.authSecKey = secretKey
+  req.authSrvKey = serverKey
 
 # ── REQ ─────────────────────────────────────────────────────────────────────
 
@@ -65,10 +65,15 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
   let ps = req
 
   proc onConnect(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = false)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "REQ"
     conn.data = cast[pointer](zc)
     ps.conn = zc
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.authSrvKey != default(array[32, uint8]):
+        curve.setCurveServerKey(zc, ps.authSrvKey)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "REP":
@@ -132,10 +137,13 @@ proc `bind`*(rep: RepSocket; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
-    let zc = initZmtpConnection(conn, asServer = true)
+    let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
+    let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "REP"
     conn.data = cast[pointer](zc)
     ps.conn = zc
+    if ps.authMech == "CURVE":
+      curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "REQ":

@@ -1,8 +1,11 @@
-## Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
-##
-## WhizMQ is not a monolithic module. Instead, it provides sub-modules that
-## implement specific socket patterns from the ZeroMQ/ØMQ ecosystem on top
-## of ZMTP 3.0 wire protocol.
+# Whiz Message Queue — A message queue library implementing ZMTP 3.0 in Nim.
+#
+# (c) 2025 George Lemon | MIT License
+#          Made by Humans from OpenPeeps
+#          https://github.com/openpeeps/whiz
+
+## Implement specific socket patterns from the ZeroMQ ecosystem on top
+## of ZMTP 3.0 wire protocol. Built on top of PowPow event library.
 ##
 ## Import the specific socket you need:
 ##   - `import whiz/pair`       — Exclusive PAIR (1-to-1 bidirectional)
