@@ -24,6 +24,8 @@ task test, "Run all unit tests":
   exec "nim c -r tests/test_pushpull.nim"
   exec "nim c -r tests/test_auth.nim"
   exec "nim c -r tests/test_curve.nim"
+  exec "nim c -r tests/test_filetx_sender.nim"
+  exec "nim c -r tests/test_filetx_receiver.nim"
 
 task bench, "Run all benchmarks":
   exec "nim c -d:release -r tests/bench_zmtp.nim"

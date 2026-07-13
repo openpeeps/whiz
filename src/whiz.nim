@@ -21,11 +21,10 @@
 when isMainModule:
   echo "WhizMQ — ZMTP 3.0 message queue library"
 else:
-  {.fatal: "Cannot import `whiz` directly. Import a specific sub-module instead:\n" &
+  error("Cannot import `whiz` directly. Import a specific sub-module instead:\n" &
           "  import whiz/pair      — Exclusive PAIR (1-to-1 bidirectional)\n" &
           "  import whiz/pubsub    — PUB/SUB (publish-subscribe)\n" &
           "  import whiz/reqrep    — REQ/REP (request-reply)\n" &
           "  import whiz/pushpull  — PUSH/PULL (pipeline)\n" &
           "  import whiz/zmtp      — ZMTP 3.0 wire protocol primitives\n" &
-          "  import whiz/filetx    — File transfer over ZMTP\n" .
-  }
+          "  import whiz/filetx    — File transfer over ZMTP\n")
