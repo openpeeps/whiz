@@ -14,16 +14,17 @@
 </p>
 
 ## 😍 Key Features
-- **ZMTP 3.0** wire protocol — full greeting, framing, and command handling
-- **Socket patterns** — PAIR, PUB/SUB, REQ/REP, PUSH/PULL, File Transfer
+- **ZMTP 3.0** wire protocol, full greeting, framing, and command handling
+- **Socket patterns**: PAIR, PUB/SUB, REQ/REP, PUSH/PULL, File Transfer
 - **Security mechanisms**:
-  - **NULL** — no authentication (plaintext)
-  - **PLAIN** — username/password authentication with ZAP callback
-  - **CURVE** — X25519 + XChaCha20-Poly1305 AEAD encryption and mutual authentication
-- **Transport** — TCP and IPC (Unix domain sockets)
-- **Built on [PowPow](https://github.com/openpeeps/powpow)** — async I/O event loop
+  - NULL: no authentication (plaintext)
+  - PLAIN: username/password authentication with ZAP callback
+  - CURVE: X25519 + XChaCha20-Poly1305 AEAD encryption and mutual authentication
+- **Transport** TCP and IPC (Unix domain sockets)
+- **Built on [PowPow](https://github.com/openpeeps/powpow)** event notification library in Nim
 
-> **Note:** CURVE requires [Monocypher](https://monocypher.org) (via the [e2ee](https://github.com/openpeeps/e2ee) package). Install it with your system package manager (`brew install monocypher`, `apt install libmonocypher-dev`, etc.) or build from source.
+> [!NOTE]
+> CURVE requires [Monocypher](https://monocypher.org) (via the [e2ee](https://github.com/openpeeps/e2ee) package). Install it with your system package manager (`brew install monocypher`, `apt install libmonocypher-dev`, etc.) or build from source.
 
 ## 🗺 Roadmap
 
