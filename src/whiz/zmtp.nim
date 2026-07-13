@@ -98,34 +98,63 @@ proc parseGreeting(buf: ptr UncheckedArray[byte]): tuple[ok: bool; mechanism: st
 # ── Frame I/O ────────────────────────────────────────────────────────────────
 
 proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
+  ## Send a ZMTP frame. When mechEncrypt is nil the body is referenced
+  ## directly (zero-copy through the framing layer). When encryption is
+  ## active the body is copied, encrypted in-place, and the ciphertext is sent.
   if zc.conn == nil: return -1
-  var payload = @body
   if zc.mechEncrypt != nil:
+    var payload = @body
     if not zc.mechEncrypt(zc, payload): return -1
-  if payload.len <= 255:
-    var hdr: array[2, byte]
-    hdr[0] = flags
-    hdr[1] = byte(payload.len)
-    if payload.len > 0:
-      result = zc.conn.sendv([
-        (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
-        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
-      ])
+    if payload.len <= 255:
+      var hdr: array[2, byte]
+      hdr[0] = flags
+      hdr[1] = byte(payload.len)
+      if payload.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
+          (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
     else:
-      result = zc.conn.send(hdr)
+      var hdr: array[10, byte]
+      hdr[0] = flags or ZmtpLong
+      let blen = uint64(payload.len)
+      for i in 0 ..< 8:
+        hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+      if payload.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
+          (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
   else:
-    var hdr: array[10, byte]
-    hdr[0] = flags or ZmtpLong
-    let blen = uint64(payload.len)
-    for i in 0 ..< 8:
-      hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
-    if payload.len > 0:
-      result = zc.conn.sendv([
-        (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
-        (cast[ptr UncheckedArray[byte]](addr payload[0]), payload.len)
-      ])
+    # Zero-copy path — reference body directly
+    if body.len <= 255:
+      var hdr: array[2, byte]
+      hdr[0] = flags
+      hdr[1] = byte(body.len)
+      if body.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
+          (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
     else:
-      result = zc.conn.send(hdr)
+      var hdr: array[10, byte]
+      hdr[0] = flags or ZmtpLong
+      let blen = uint64(body.len)
+      for i in 0 ..< 8:
+        hdr[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+      if body.len > 0:
+        result = zc.conn.sendv([
+          (cast[ptr UncheckedArray[byte]](addr hdr[0]), 10),
+          (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
+        ])
+      else:
+        result = zc.conn.send(hdr)
 
 proc sendCommand*(zc: ZmtpConnection; name: string; data: openArray[byte] = @[]): int =
   var body = newSeq[byte](name.len + 1 + data.len)

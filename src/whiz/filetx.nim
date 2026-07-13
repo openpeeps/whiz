@@ -11,6 +11,13 @@
 ## FILE_CHUNK. This provides natural back-pressure. Supports cancel
 ## from either side and restart from any offset.
 ##
+## ## Performance
+## - Sender uses a single pre-allocated buffer (zero heap allocs per chunk)
+##  - File data read directly into the wire-frame buffer — zero copy through
+##    the framing layer via `sendFrame`'s fast path
+## - Receiver writes chunk data straight from the recv buffer to disk and
+##   reuses a single REQ frame allocation for all request messages
+##
 ## Usage (unicast over PAIR):
 ##
 ##   # Sender
@@ -42,11 +49,12 @@ type
   FileSender* = ref object
     conn*:      ZmtpConnection
     path:       string
-    fd:         int         # POSIX fd from openFileRead
+    fd:         int                  # POSIX fd from openFileRead
     fileSize:   int64
     offset:     int64
     chunkSize:  int
     cancelled:  bool
+    buf:        seq[byte]            # pre-allocated, reused per chunk
     onProgress*: proc(sent, total: int64) {.closure.}
     onComplete*: proc() {.closure.}
     onError*:    proc(reason: string) {.closure.}
@@ -54,11 +62,12 @@ type
   FileReceiver* = ref object
     conn:       ZmtpConnection
     path:       string
-    fp:         File        # Nim File for writing
+    fp:         File                 # Nim File for writing
     fileSize:   int64
     offset:     int64
     chunkSize:  int
     cancelled:  bool
+    reqBuf:     seq[byte]            # pre-built REQ frame, reused
     onProgress*: proc(received, total: int64) {.closure.}
     onComplete*: proc(path: string) {.closure.}
     onError*:    proc(reason: string) {.closure.}
@@ -100,6 +109,8 @@ proc start*(fs: FileSender) =
     if fs.onError != nil: fs.onError("Cannot stat: " & fs.path)
     return
   fs.offset = 0
+  # Pre-allocate reusable chunk buffer (1 header + 8 offset + data)
+  fs.buf = newSeq[byte](1 + 8 + fs.chunkSize)
   let name = fs.path.extractFilename
   var body = newSeq[byte](1 + name.len + 1 + 8)
   body[0] = FTypeInit
@@ -122,20 +133,23 @@ proc feedReq*(fs: FileSender; data: openArray[byte]) =
   let remaining = fs.fileSize - fs.offset
   if remaining <= 0: return
   let toSend = min(remaining, fs.chunkSize.int64).int
-  var buf = newSeq[byte](1 + 8 + toSend)
-  buf[0] = FTypeChunk
-  writeI64(cast[ptr UncheckedArray[byte]](addr buf[1]), 0, fs.offset)
+  # Fill pre-allocated buffer: FTypeChunk | offset(8) | data
+  fs.buf[0] = FTypeChunk
+  writeI64(cast[ptr UncheckedArray[byte]](addr fs.buf[1]), 0, fs.offset)
   if toSend > 0:
-    let n = c_read(cint(fs.fd), cast[pointer](addr buf[9]), csize_t(toSend))
+    let n = c_read(cint(fs.fd), cast[pointer](addr fs.buf[9]), csize_t(toSend))
     if n <= 0:
       if fs.onError != nil: fs.onError("Read error at " & $fs.offset)
       return
-    buf.setLen(1 + 8 + n)
-  fs.conn.sendMessage(buf)
-  fs.offset += (buf.len - 9)
+    # Send the used portion of the buffer — zero-copy through sendFrame
+    discard fs.conn.sendFrame(0, fs.buf.toOpenArray(0, 8 + n))
+    fs.offset += n
+  else:
+    discard fs.conn.sendFrame(0, fs.buf.toOpenArray(0, 8))
   if fs.onProgress != nil: fs.onProgress(fs.offset, fs.fileSize)
   if fs.offset >= fs.fileSize:
     closeFile(fs.fd); fs.fd = -1
+    fs.buf.setLen(0)  # release buffer
     var done = newSeq[byte](1); done[0] = FTypeDone
     fs.conn.sendMessage(done)
     if fs.onComplete != nil: fs.onComplete()
@@ -144,7 +158,10 @@ proc feedReq*(fs: FileSender; data: openArray[byte]) =
 
 proc newFileReceiver*(conn: ZmtpConnection; path: string;
                       chunkSize: int = FileTxChunkSize): FileReceiver =
-  FileReceiver(conn: conn, path: path, chunkSize: chunkSize)
+  var fr = FileReceiver(conn: conn, path: path, chunkSize: chunkSize)
+  fr.reqBuf = newSeq[byte](9)
+  fr.reqBuf[0] = FTypeReq
+  fr
 
 proc cancel*(fr: FileReceiver; reason: string = "") =
   if fr.cancelled: return
@@ -178,9 +195,8 @@ proc feed*(fr: FileReceiver; data: openArray[byte]): bool =
       if fr.onError != nil: fr.onError("Cannot create: " & fr.path)
       return false
     fr.offset = 0
-    var req = newSeq[byte](9); req[0] = FTypeReq
-    writeI64(cast[ptr UncheckedArray[byte]](addr req[1]), 0, 0)
-    fr.conn.sendMessage(req)
+    writeI64(cast[ptr UncheckedArray[byte]](addr fr.reqBuf[1]), 0, 0)
+    fr.conn.sendMessage(fr.reqBuf)
     return true
 
   of FTypeChunk:
@@ -197,9 +213,8 @@ proc feed*(fr: FileReceiver; data: openArray[byte]): bool =
     fr.offset += chunkLen
     if fr.onProgress != nil: fr.onProgress(fr.offset, fr.fileSize)
     if fr.offset < fr.fileSize:
-      var req = newSeq[byte](9); req[0] = FTypeReq
-      writeI64(cast[ptr UncheckedArray[byte]](addr req[1]), 0, fr.offset)
-      fr.conn.sendMessage(req)
+      writeI64(cast[ptr UncheckedArray[byte]](addr fr.reqBuf[1]), 0, fr.offset)
+      fr.conn.sendMessage(fr.reqBuf)
     return true
 
   of FTypeDone:
