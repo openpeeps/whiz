@@ -46,6 +46,34 @@
 ## Examples
 ...
 
+### Benchmarks
+> [!NOTE]
+> Benchmark results are not consistent and may show different results across runs and environments.
+
+```
+[Suite] bench_zmtp
+  bench_pair_latency  N=5000  size=1  98626us  50696/s
+  [OK] bench_pair_latency
+  bench_pair_throughput  N=10000  size=512  23014us  434518/s
+  [OK] bench_pair_throughput
+  bench_pubsub_1sub  N=10000  size=512  19494us  512978/s
+  [OK] bench_pubsub_1sub
+  bench_pubsub_2sub  N=5000  size=256  14203us  704076/s
+  [OK] bench_pubsub_2sub
+  bench_reqrep  N=5000  size=128  143962us  34731/s
+  [OK] bench_reqrep
+  bench_sizes_pair  N=2000  size=64  6377us  313627/s
+  bench_sizes_pair  N=2000  size=1024  8975us  222841/s
+  bench_sizes_pair  N=2000  size=65536  575434us  3475/s
+  [OK] bench_sizes_pair
+  bench_pushpull_throughput  N=10000  size=512  110386us  90591/s
+  [OK] bench_pushpull_throughput
+  bench_pushpull_1worker  N=10000  size=128  11950us  836820/s
+  [OK] bench_pushpull_1worker
+  bench_pushpull_3workers  N=5000  size=128  8454us  591436/s
+  [OK] bench_pushpull_3workers
+```
+
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/openpeeps/whiz/issues)
 - 👋 Wanna help? [Fork it!](https://github.com/openpeeps/whiz/fork)
