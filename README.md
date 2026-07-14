@@ -50,29 +50,40 @@
 > [!NOTE]
 > Benchmark results are not consistent and may show different results across runs and environments.
 
-```
-[Suite] bench_zmtp
-  bench_pair_latency  N=5000  size=1  98626us  50696/s
-  [OK] bench_pair_latency
-  bench_pair_throughput  N=10000  size=512  23014us  434518/s
-  [OK] bench_pair_throughput
-  bench_pubsub_1sub  N=10000  size=512  19494us  512978/s
-  [OK] bench_pubsub_1sub
-  bench_pubsub_2sub  N=5000  size=256  14203us  704076/s
-  [OK] bench_pubsub_2sub
-  bench_reqrep  N=5000  size=128  143962us  34731/s
-  [OK] bench_reqrep
-  bench_sizes_pair  N=2000  size=64  6377us  313627/s
-  bench_sizes_pair  N=2000  size=1024  8975us  222841/s
-  bench_sizes_pair  N=2000  size=65536  575434us  3475/s
-  [OK] bench_sizes_pair
-  bench_pushpull_throughput  N=10000  size=512  110386us  90591/s
-  [OK] bench_pushpull_throughput
-  bench_pushpull_1worker  N=10000  size=128  11950us  836820/s
-  [OK] bench_pushpull_1worker
-  bench_pushpull_3workers  N=5000  size=128  8454us  591436/s
-  [OK] bench_pushpull_3workers
-```
+| benchmark | subscriber | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bench_pair_latency_tcp | - | 5000 | 1 | 100325 | 49837 | 17.9 | 18.4 | 18.9 | 23.1 | 41.7 | 20.0 | 4.7 |
+| bench_pair_latency_unix | - | 5000 | 1 | 64249 | 77821 | 12.2 | 12.5 | 12.6 | 12.9 | 18.5 | 12.8 | 1.2 |
+| bench_pair_throughput_tcp | - | 10000 | 512 | 16445 | 608080 | 0.0 | 0.0 | 0.1 | 1.3 | 4.0 | 0.4 | 3.5 |
+| bench_pair_throughput_unix | - | 10000 | 512 | 15291 | 653975 | 0.0 | 0.0 | 0.1 | 1.3 | 12.5 | 0.9 | 3.0 |
+| bench_pubsub_1sub_tcp | - | 10000 | 512 | 11360 | 880222 | 0.0 | 0.0 | 0.1 | 1.3 | 3.8 | 0.4 | 3.4 |
+| bench_pubsub_1sub_unix | - | 10000 | 512 | 13933 | 717704 | 0.0 | 0.0 | 0.1 | 1.3 | 12.1 | 0.9 | 2.9 |
+| bench_pubsub_2sub_tcp | sub0 | 5000 | 256 | 15679 | 318881 | 0.0 | 0.0 | 0.0 | 0.1 | 6.9 | 0.5 | 17.3 |
+| bench_pubsub_2sub_tcp | sub1 | 4143 | 256 | 15679 | 264225 | 0.0 | 0.0 | 0.0 | 0.1 | 7.3 | 0.5 | 12.2 |
+| bench_pubsub_2sub_tcp | total | 9143 | 256 | 15679 | 583106 | 0.0 | 0.0 | 0.0 | 0.1 | 7.1 | 0.5 | 15.2 |
+| bench_pubsub_2sub_unix | sub0 | 5000 | 256 | 5279 | 947043 | 0.0 | 0.0 | 0.0 | 0.1 | 19.2 | 0.7 | 3.4 |
+| bench_pubsub_2sub_unix | sub1 | 5000 | 256 | 5279 | 947043 | 0.0 | 0.0 | 0.0 | 0.1 | 19.3 | 0.7 | 3.4 |
+| bench_pubsub_2sub_unix | total | 10000 | 256 | 5279 | 1894086 | 0.0 | 0.0 | 0.0 | 0.1 | 19.2 | 0.7 | 3.4 |
+| bench_reqrep_tcp | - | 5000 | 128 | 100401 | 49800 | 16.6 | 18.9 | 19.2 | 23.5 | 38.2 | 20.0 | 3.7 |
+| bench_reqrep_unix | - | 5000 | 128 | 64793 | 77168 | 12.5 | 12.8 | 12.8 | 12.9 | 16.1 | 12.9 | 0.9 |
+| bench_sizes_pair_tcp | - | 2000 | 64 | 5586 | 357990 | 0.0 | 0.0 | 0.0 | 0.0 | 3.1 | 0.1 | 0.5 |
+| bench_sizes_pair_tcp | - | 2000 | 1024 | 3461 | 577759 | 0.0 | 0.0 | 1.2 | 1.6 | 2.7 | 0.6 | 3.6 |
+| bench_sizes_pair_tcp | - | 2000 | 65536 | 258856 | 7726 | 19.4 | 20.4 | 21.8 | 25.6 | 253.5 | 28.4 | 39.9 |
+| bench_sizes_pair_unix | - | 2000 | 64 | 582 | 3435942 | 0.0 | 0.0 | 0.0 | 0.0 | 1.5 | 0.1 | 1.1 |
+| bench_sizes_pair_unix | - | 2000 | 1024 | 4677 | 427548 | 0.0 | 0.0 | 1.3 | 11.4 | 12.3 | 1.7 | 3.9 |
+| bench_sizes_pair_unix | - | 2000 | 65536 | 411682 | 4858 | 99.7 | 104.1 | 107.3 | 110.7 | 126.9 | 105.3 | 5.3 |
+| bench_pushpull_throughput_tcp | - | 10000 | 512 | 10436 | 958154 | 0.0 | 0.0 | 0.1 | 1.3 | 3.9 | 0.3 | 3.4 |
+| bench_pushpull_throughput_unix | - | 10000 | 512 | 11985 | 834370 | 0.0 | 0.0 | 0.1 | 1.3 | 12.2 | 0.9 | 3.0 |
+| bench_pushpull_1worker_tcp | - | 10000 | 128 | 3979 | 2512663 | 0.0 | 0.0 | 0.0 | 0.0 | 1.6 | 0.1 | 2.4 |
+| bench_pushpull_1worker_unix | - | 10000 | 128 | 3643 | 2744939 | 0.0 | 0.0 | 0.0 | 0.0 | 11.5 | 0.2 | 1.5 |
+| bench_pushpull_3workers_tcp | worker0 | 1667 | 128 | 6350 | 262516 | 0.0 | 0.0 | 0.0 | 0.0 | 3.2 | 0.4 | 9.4 |
+| bench_pushpull_3workers_tcp | worker1 | 1667 | 128 | 6350 | 262516 | 0.0 | 0.0 | 0.0 | 0.0 | 2.8 | 0.3 | 8.2 |
+| bench_pushpull_3workers_tcp | worker2 | 1666 | 128 | 6350 | 262358 | 0.0 | 0.0 | 0.0 | 0.0 | 2.8 | 0.3 | 7.0 |
+| bench_pushpull_3workers_tcp | total | 5000 | 128 | 6350 | 787391 | 0.0 | 0.0 | 0.0 | 0.0 | 4.3 | 0.3 | 8.3 |
+| bench_pushpull_3workers_unix | worker0 | 1667 | 128 | 1599 | 1041951 | 0.0 | 0.0 | 0.0 | 0.1 | 27.7 | 0.5 | 3.7 |
+| bench_pushpull_3workers_unix | worker1 | 1667 | 128 | 1599 | 1041951 | 0.0 | 0.0 | 0.0 | 0.0 | 27.7 | 0.5 | 3.6 |
+| bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 1599 | 1041326 | 0.0 | 0.0 | 0.0 | 0.1 | 27.7 | 0.5 | 3.6 |
+| bench_pushpull_3workers_unix | total | 5000 | 128 | 1599 | 3125228 | 0.0 | 0.0 | 0.0 | 0.0 | 27.7 | 0.5 | 3.6 |
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/openpeeps/whiz/issues)
