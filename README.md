@@ -50,6 +50,25 @@
 > [!NOTE]
 > Benchmark results are not consistent and may show different results across runs and environments.
 
+**Column legend:**
+- `benchmark` — test name: `{pattern}_{scenario}_{transport}` (`_tcp` or `_unix`)
+- `subscriber` — specific subscriber/worker for multi-endpoint tests; `total` is the aggregate row, `-` for single-endpoint
+- `n` — number of messages sent (throughput) or round-trips (latency)
+- `size` — payload size in bytes
+- `total(μs)` — wall-clock duration of the test in microseconds
+- `throughput/s` — messages per second = `n / total(μs) * 1_000_000`
+- `min(μs)` — fastest observed per-message time (minimum)
+- `p50(μs)` — median per-message time (50th percentile)
+- `p75(μs)` — 75th percentile per-message time
+- `p90(μs)` — 90th percentile per-message time
+- `p99(μs)` — 99th percentile per-message time
+- `avg(μs)` — arithmetic mean per-message time
+- `σ(μs)` — population standard deviation of per-message times
+
+**Per-message time collection:**
+- **Latency benchmarks** (`pair_latency`, `reqrep`): each value is one request–reply round-trip measured from the client
+- **Throughput benchmarks** (all others): inter-arrival deltas between consecutive receives — approximates per-message service time distribution
+
 | benchmark | subscriber | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | bench_pair_latency_tcp | - | 5000 | 1 | 100325 | 49837 | 17.9 | 18.4 | 18.9 | 23.1 | 41.7 | 20.0 | 4.7 |
