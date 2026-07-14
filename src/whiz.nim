@@ -14,9 +14,10 @@
 ##   - `import whiz/pushpull`   — PUSH/PULL (pipeline)
 ##   - `import whiz/zmtp`       — ZMTP 3.0 wire protocol primitives
 ##   - `import whiz/filetx`     — File transfer over ZMTP
+##   - `import whiz/ws`         — WebSocket transport (all patterns over WS)
 ##
 ## Or import everything at once with:
-##   `import whiz/[zmtp, pair, pubsub, reqrep, pushpull, filetx]`
+##   `import whiz/[zmtp, pair, pubsub, reqrep, pushpull, filetx, ws]`
 
 when isMainModule:
   echo "WhizMQ — ZMTP 3.0 message queue library"
@@ -27,4 +28,5 @@ else:
           "  import whiz/reqrep    — REQ/REP (request-reply)\n" &
           "  import whiz/pushpull  — PUSH/PULL (pipeline)\n" &
           "  import whiz/zmtp      — ZMTP 3.0 wire protocol primitives\n" &
-          "  import whiz/filetx    — File transfer over ZMTP\n")
+          "  import whiz/filetx    — File transfer over ZMTP\n" &
+          "  import whiz/ws        — WebSocket transport\n")

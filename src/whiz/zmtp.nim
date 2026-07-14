@@ -72,6 +72,9 @@ type
     mechDecrypt*: proc(zc: ZmtpConnection; data: var seq[byte]): bool {.closure.}
     mechDestroy*: proc(zc: ZmtpConnection) {.closure.}
     mechData*:     RootRef  # mechanism-specific state
+    # Non-nil when ZMTP frames are tunnelled through another transport (e.g. WebSocket).
+    # Called with raw ZMTP frame bytes (header + body) to send through the tunnel.
+    sendOverride*: proc(zc: ZmtpConnection; data: openArray[byte]): int {.closure.}
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +105,23 @@ proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
   ## directly (zero-copy through the framing layer). When encryption is
   ## active the body is copied, encrypted in-place, and the ciphertext is sent.
   if zc.conn == nil: return -1
+  if zc.sendOverride != nil:
+    var frame: seq[byte]
+    if body.len <= 255:
+      frame = newSeq[byte](2 + body.len)
+      frame[0] = flags
+      frame[1] = byte(body.len)
+      if body.len > 0:
+        copyMem(addr frame[2], unsafeAddr body[0], body.len)
+    else:
+      frame = newSeq[byte](10 + body.len)
+      frame[0] = flags or ZmtpLong
+      let blen = uint64(body.len)
+      for i in 0 ..< 8:
+        frame[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+      if body.len > 0:
+        copyMem(addr frame[10], unsafeAddr body[0], body.len)
+    return zc.sendOverride(zc, frame)
   if zc.mechEncrypt != nil:
     var payload = @body
     if not zc.mechEncrypt(zc, payload): return -1
@@ -385,7 +405,7 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
 
 # ── Connection setup ─────────────────────────────────────────────────────────
 
-proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "NULL"): ZmtpConnection =
+proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "NULL"; skipGreeting: bool = false): ZmtpConnection =
   result = ZmtpConnection(
     conn: conn,
     state: ZmtpGreeting,
@@ -394,4 +414,5 @@ proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "
     asServer: asServer,
     recvOff: 0,
   )
-  discard result.conn.send(buildGreeting(asServer, mechanism))
+  if not skipGreeting:
+    discard result.conn.send(buildGreeting(asServer, mechanism))
