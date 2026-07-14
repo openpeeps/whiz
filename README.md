@@ -104,6 +104,14 @@
 | bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 1599 | 1041326 | 0.0 | 0.0 | 0.0 | 0.1 | 27.7 | 0.5 | 3.6 |
 | bench_pushpull_3workers_unix | total | 5000 | 128 | 1599 | 3125228 | 0.0 | 0.0 | 0.0 | 0.0 | 27.7 | 0.5 | 3.6 |
 
+**Key observations:**
+- **Unix domain sockets are faster for small messages** — latency benchmarks show ~55% higher throughput on Unix (pair_latency: 78k/s vs 50k/s; reqrep: 77k/s vs 50k/s) by skipping TCP stack overhead.
+- **Unix latency is more consistent** — σ drops from 4.7→1.2 (pair_latency) and 3.7→0.9 (reqrep), indicating less jitter.
+- **Large payloads (≥64 KiB) favor TCP** — Unix has smaller default socket buffers, causing fragmentation: 65536B pair throughput is 7.7k/s (TCP) vs 4.9k/s (Unix), with avg latency 28μs vs 105μs.
+- **Multi-worker pushpull scales poorly on TCP** — 3 workers saturate at 787k/s (less than a single worker's 2.5M/s) due to TCP fairness/contention. Unix handles it near-linearly at 3.1M/s aggregate.
+- **Pub/sub delivery is imbalanced on TCP** — `pubsub_2sub` TCP delivers 5000/4143 unevenly; Unix delivers evenly (5000/5000), suggesting single-subscriber fairness differences with Nagle/ACK delaying.
+- **Throughput is consistent across runs** — no multi-second stalls or order-of-magnitude variance, confirming the earlier TCP cork and edge-triggered event fixes are effective.
+
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/openpeeps/whiz/issues)
 - 👋 Wanna help? [Fork it!](https://github.com/openpeeps/whiz/fork)
