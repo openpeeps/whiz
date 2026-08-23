@@ -121,7 +121,14 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
 
     ps.subs.add(sub)
 
-  result.server = newTcpServer(loop, onAccept = onAccept, onData = feedData)
+  proc onConnClosed(conn: Connection) =
+    let zc = cast[ZmtpConnection](conn.data)
+    if zc != nil and zc.state != ZmtpClosed:
+      zc.state = ZmtpClosed
+      if zc.onClose != nil: zc.onClose(zc)
+
+  result.server = newTcpServer(loop, onAccept = onAccept, onData = feedData,
+                               onClose = onConnClosed)
   case transport
   of TransportTcp:
     result.server.listen(address, port)
@@ -138,12 +145,18 @@ proc close*(pub: PubSocket) =
   if pub.server != nil:
     pub.server.close()
 
-proc publish*(pub: PubSocket; data: string) =
+proc publish*(pub: PubSocket; data: string): bool {.discardable.} =
+  ## Sends to every subscriber with a matching topic. Returns true when no
+  ## matching send failed (vacuously true when nothing matched); false means
+  ## at least one matched subscriber's transport is dead and that copy was
+  ## not delivered.
+  result = true
   for sub in pub.subs:
     if sub.topics.len > 0:
       for t in sub.topics:
         if t.len == 0 or data.startsWith(t):
-          sub.zc.sendMessage(data.toOpenArrayByte(0, data.high))
+          if not sub.zc.sendMessage(data.toOpenArrayByte(0, data.high)):
+            result = false
           break
 
 # ── SubSocket ────────────────────────────────────────────────────────────────

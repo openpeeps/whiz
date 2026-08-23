@@ -1,7 +1,18 @@
 ## tests/bench_zmtp.nim — Benchmarks for ZMTP 3.0 socket patterns.
 ##
-## Measures latency and throughput for PAIR, PUB/SUB, and REQ/REP
-## over the ZMTP wire protocol on localhost TCP.
+## Measures latency and throughput for PAIR, PUB/SUB, REQ/REP, PUSH/PULL
+## over the ZMTP wire protocol on localhost TCP / Unix sockets.
+##
+## Every benchmark arms a watchdog timer so a stalled connection can never
+## hang the suite: if the expected messages don't arrive in time, the loop
+## stops, diagnostics are printed, and the incomplete run is discarded.
+##
+## Flood-style benchmarks send synchronously; their totals stay well under
+## powpow's per-connection write cap (`maxWriteBufferSize`, 32MB default,
+## tunable via `-d:maxWriteBufferSize=N` in MB). bench_sizes_pair paces its
+## 64KB payload in small event-loop-scheduled batches instead: a synchronous
+## 131MB burst blocks the same-loop receiver from draining, grows the sender's
+## buffer past the cap, and powpow silently closes the connection mid-flood.
 ##
 ## Run:  nim c -d:release -r tests/bench_zmtp.nim
 
@@ -16,6 +27,8 @@ proc allocPort: int = result = nextPort; inc nextPort
 
 proc monoNs(): int64 {.inline.} =
   getMonoTime().ticks
+
+const WatchdogMs = 30_000
 
 type BenchRow = object
   label: string
@@ -80,10 +93,16 @@ proc renderTable: string =
     lines.add &"| {r.label} | {sub} | {r.n} | {r.size} | {tUs} | {throughput} | {perMsgStats(r.perMsgNs)} |"
   lines.join("\n")
 
+proc armWatchdog(loop: Loop; finished: ptr bool; label: string) =
+  discard loop.addTimer(WatchdogMs) do (id: int):
+    if not finished[]:
+      echo "TIMEOUT after ", WatchdogMs, "ms in ", label
+
 proc bench_pair_latency(cfg: BenchCfg) =
   const N = 5000
   const Payload = "A"
   var replies = 0
+  var finished = false
   var perMsg: seq[int64]
   var tSend: int64
   let loop = newLoop()
@@ -99,6 +118,7 @@ proc bench_pair_latency(cfg: BenchCfg) =
       tSend = monoNs()
       cli.send(Payload)
     else:
+      finished = true
       loop.stop()
   var t0 = monoNs()
   discard loop.addTimer(50) do (id: int):
@@ -107,9 +127,13 @@ proc bench_pair_latency(cfg: BenchCfg) =
     t0 = monoNs()
     tSend = monoNs()
     cli.send(Payload)
+  armWatchdog(loop, addr finished, "bench_pair_latency")
   loop.run()
   let elapsed = monoNs() - t0
-  allRows.add BenchRow(label: "bench_pair_latency" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: Payload.len, totalNs: elapsed, perMsgNs: perMsg)
+  if finished:
+    allRows.add BenchRow(label: "bench_pair_latency" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: Payload.len, totalNs: elapsed, perMsgNs: perMsg)
+  else:
+    echo "bench_pair_latency: incomplete (", replies, "/", N, ") — results discarded"
   cli.close()
   srv.close()
   loop.close()
@@ -120,6 +144,7 @@ proc bench_pair_throughput(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var received = 0
+  var finished = false
   var elapsed = 0i64
   var t0 = 0i64
   var recvTs: seq[int64]
@@ -132,18 +157,25 @@ proc bench_pair_throughput(cfg: BenchCfg) =
     inc received
     if received >= N:
       elapsed = monoNs() - t0
+      finished = true
       loop.stop()
   discard loop.addTimer(50) do (id: int):
     cli.connect(cfg.address, cfg.port, cfg.transport)
   discard loop.addTimer(500) do (id: int):
+    # 10000 x 512B = ~5MB total; fits under powpow's write cap even while the
+    # receiver is blocked for the duration of this synchronous burst.
     t0 = monoNs()
     for i in 0 ..< N:
       cli.send(payload)
+  armWatchdog(loop, addr finished, "bench_pair_throughput")
   loop.run()
-  var deltas: seq[int64]
-  for i in 1 ..< recvTs.len:
-    deltas.add(recvTs[i] - recvTs[i-1])
-  allRows.add BenchRow(label: "bench_pair_throughput" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  if finished:
+    var deltas: seq[int64]
+    for i in 1 ..< recvTs.len:
+      deltas.add(recvTs[i] - recvTs[i-1])
+    allRows.add BenchRow(label: "bench_pair_throughput" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  else:
+    echo "bench_pair_throughput: incomplete (", received, "/", N, ") — results discarded"
   cli.close()
   srv.close()
   loop.close()
@@ -155,6 +187,7 @@ proc bench_pubsub_1sub(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var received = 0
+  var finished = false
   var recvTs: seq[int64]
   let loop = newLoop()
   let pub = newPubSocket(loop, cfg.address, cfg.port, cfg.transport)
@@ -162,21 +195,27 @@ proc bench_pubsub_1sub(cfg: BenchCfg) =
   sub.onMessage = proc(topic, data: openArray[byte]) {.closure.} =
     recvTs.add(monoNs())
     inc received
-    if received >= N: loop.stop()
+    if received >= N:
+      finished = true
+      loop.stop()
   sub.subscribe("")
   discard loop.addTimer(50) do (id: int):
     sub.connect(cfg.address, cfg.port, cfg.transport)
   var t0 = monoNs()
   discard loop.addTimer(500) do (id: int):
+    # 10000 x 512B = ~5MB total — under powpow's write cap; synchronous is fine.
     t0 = monoNs()
     for i in 0 ..< N:
       pub.publish(payload)
   loop.run()
   let elapsed = monoNs() - t0
-  var deltas: seq[int64]
-  for i in 1 ..< recvTs.len:
-    deltas.add(recvTs[i] - recvTs[i-1])
-  allRows.add BenchRow(label: "bench_pubsub_1sub" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  if finished:
+    var deltas: seq[int64]
+    for i in 1 ..< recvTs.len:
+      deltas.add(recvTs[i] - recvTs[i-1])
+    allRows.add BenchRow(label: "bench_pubsub_1sub" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  else:
+    echo "bench_pubsub_1sub: incomplete (", received, "/", N, ") — results discarded"
   sub.close()
   pub.close()
   loop.close()
@@ -188,6 +227,7 @@ proc bench_pubsub_2sub(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var a, b = 0
+  var finished = false
   var recvTsA, recvTsB: seq[int64]
   let loop = newLoop()
   let pub = newPubSocket(loop, cfg.address, cfg.port, cfg.transport)
@@ -195,10 +235,14 @@ proc bench_pubsub_2sub(cfg: BenchCfg) =
   let sub2 = newSubSocket(loop)
   sub1.onMessage = proc(topic, data: openArray[byte]) {.closure.} =
     recvTsA.add(monoNs())
-    inc a; if a >= N: loop.stop()
+    inc a; if a >= N:
+      finished = true
+      loop.stop()
   sub2.onMessage = proc(topic, data: openArray[byte]) {.closure.} =
     recvTsB.add(monoNs())
-    inc b; if b >= N: loop.stop()
+    inc b; if b >= N:
+      finished = true
+      loop.stop()
   sub1.subscribe("")
   sub2.subscribe("")
   discard loop.addTimer(50) do (id: int):
@@ -215,12 +259,15 @@ proc bench_pubsub_2sub(cfg: BenchCfg) =
     result = newSeq[int64](max(0, ts.len - 1))
     for i in 1 ..< ts.len:
       result[i-1] = ts[i] - ts[i-1]
-  let d0 = deltas(recvTsA)
-  let d1 = deltas(recvTsB)
-  let sfx = transportSuffix(cfg.transport)
-  allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "sub0", n: a, size: PayloadLen, totalNs: elapsed, perMsgNs: d0)
-  allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "sub1", n: b, size: PayloadLen, totalNs: elapsed, perMsgNs: d1)
-  allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "total", n: a+b, size: PayloadLen, totalNs: elapsed, perMsgNs: d0 & d1)
+  if finished:
+    let d0 = deltas(recvTsA)
+    let d1 = deltas(recvTsB)
+    let sfx = transportSuffix(cfg.transport)
+    allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "sub0", n: a, size: PayloadLen, totalNs: elapsed, perMsgNs: d0)
+    allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "sub1", n: b, size: PayloadLen, totalNs: elapsed, perMsgNs: d1)
+    allRows.add BenchRow(label: "bench_pubsub_2sub" & sfx, subscriber: "total", n: a+b, size: PayloadLen, totalNs: elapsed, perMsgNs: d0 & d1)
+  else:
+    echo "bench_pubsub_2sub: incomplete (", a + b, "/", N * 2, ") — results discarded"
   sub1.close()
   sub2.close()
   pub.close()
@@ -232,6 +279,7 @@ proc bench_reqrep(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var replies = 0
+  var finished = false
   var perMsg: seq[int64]
   var tSend: int64
   let loop = newLoop()
@@ -247,6 +295,7 @@ proc bench_reqrep(cfg: BenchCfg) =
       tSend = monoNs()
       req.send(payload)
     else:
+      finished = true
       loop.stop()
   var t0 = monoNs()
   discard loop.addTimer(50) do (id: int):
@@ -255,42 +304,80 @@ proc bench_reqrep(cfg: BenchCfg) =
     t0 = monoNs()
     tSend = monoNs()
     req.send(payload)
+  armWatchdog(loop, addr finished, "bench_reqrep")
   loop.run()
   let elapsed = monoNs() - t0
-  allRows.add BenchRow(label: "bench_reqrep" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: perMsg)
+  if finished:
+    allRows.add BenchRow(label: "bench_reqrep" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: perMsg)
+  else:
+    echo "bench_reqrep: incomplete (", replies, "/", N, ") — results discarded"
   req.close()
   rep.close()
   loop.close()
 
 proc bench_sizes_pair(cfg: BenchCfg) =
+  ## ACK-windowed throughput: PAIR is bidirectional, so the server echoes a
+  ## 1-byte ack for every AckEvery messages received and the client keeps at
+  ## most AckEvery unacked messages in flight. This provides real backpressure
+  ## — without it, a flood of 64KB frames outruns the drain rate, grows the
+  ## sender's write buffer past powpow's maxWriteBufferSize cap (default 32MB,
+  ## `-d:maxWriteBufferSize=N` in MB) and powpow silently closes the conn.
   let sfx = transportSuffix(cfg.transport)
+  const N = 2000
+  const AckEvery = 250
   for size in [64, 1024, 65536]:
-    const N = 2000
     var payload = newString(size)
     for i in 0 ..< size: payload[i] = byte((i and 0x7F) + 32).char
     var received = 0
+    var finished = false
+    var acksSeen = 0
+    var inFlight = 0
+    var sent = 0
     var t0 = 0i64
     var recvTs: seq[int64]
     let loop = newLoop()
     let srv = newPairSocket(loop)
     srv.`bind`(cfg.address, cfg.port, cfg.transport)
     let cli = newPairSocket(loop)
+
+    proc pump: int =
+      while sent < N and inFlight < AckEvery:
+        cli.send(payload)
+        inc sent
+        inc inFlight
+      result = sent
+
     srv.onMessage = proc(data: openArray[byte]) {.closure.} =
       recvTs.add(monoNs())
       inc received
-      if received >= N: loop.stop()
+      if received mod AckEvery == 0:
+        srv.send("A")
+      if received >= N:
+        finished = true
+        loop.stop()
+    cli.onMessage = proc(data: openArray[byte]) {.closure.} =
+      # ack from server: a full window has been consumed
+      inc acksSeen
+      inFlight = max(0, inFlight - AckEvery)
+      if not finished and sent < N:
+        discard pump()
+
     discard loop.addTimer(50) do (id: int):
       cli.connect(cfg.address, cfg.port, cfg.transport)
     discard loop.addTimer(500) do (id: int):
       t0 = monoNs()
-      for i in 0 ..< N:
-        cli.send(payload)
+      recvTs.add(t0)
+      discard pump()
+    armWatchdog(loop, addr finished, "bench_sizes_pair/" & $size)
     loop.run()
     let elapsed = monoNs() - t0
-    var deltas: seq[int64]
-    for i in 1 ..< recvTs.len:
-      deltas.add(recvTs[i] - recvTs[i-1])
-    allRows.add BenchRow(label: "bench_sizes_pair" & sfx, subscriber: "-", n: N, size: size, totalNs: elapsed, perMsgNs: deltas)
+    if finished:
+      var deltas: seq[int64]
+      for i in 1 ..< recvTs.len:
+        deltas.add(recvTs[i] - recvTs[i-1])
+      allRows.add BenchRow(label: "bench_sizes_pair" & sfx, subscriber: "-", n: N, size: size, totalNs: elapsed, perMsgNs: deltas)
+    else:
+      echo "bench_sizes_pair(", size, "): incomplete (", received, "/", N, ") — results discarded"
     cli.close()
     srv.close()
     loop.close()
@@ -301,6 +388,7 @@ proc bench_pushpull_throughput(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var received = 0
+  var finished = false
   var recvTs: seq[int64]
   let loop = newLoop()
   let push = newPushSocket(loop)
@@ -309,20 +397,28 @@ proc bench_pushpull_throughput(cfg: BenchCfg) =
   pull.onMessage = proc(data: openArray[byte]) {.closure.} =
     recvTs.add(monoNs())
     inc received
-    if received >= N: loop.stop()
+    if received >= N:
+      finished = true
+      loop.stop()
+
   var t0 = monoNs()
   discard loop.addTimer(50) do (id: int):
     pull.connect(cfg.address, cfg.port, cfg.transport)
   discard loop.addTimer(500) do (id: int):
+    # 10000 x 512B = ~5MB total — under powpow's write cap; synchronous is fine.
     t0 = monoNs()
     for i in 0 ..< N:
       push.send(payload)
+  armWatchdog(loop, addr finished, "bench_pushpull_throughput")
   loop.run()
   let elapsed = monoNs() - t0
-  var deltas: seq[int64]
-  for i in 1 ..< recvTs.len:
-    deltas.add(recvTs[i] - recvTs[i-1])
-  allRows.add BenchRow(label: "bench_pushpull_throughput" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  if finished:
+    var deltas: seq[int64]
+    for i in 1 ..< recvTs.len:
+      deltas.add(recvTs[i] - recvTs[i-1])
+    allRows.add BenchRow(label: "bench_pushpull_throughput" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  else:
+    echo "bench_pushpull_throughput: incomplete (", received, "/", N, ") — results discarded"
   pull.close()
   push.close()
   loop.close()
@@ -333,6 +429,7 @@ proc bench_pushpull_1worker(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var received = 0
+  var finished = false
   var recvTs: seq[int64]
   let loop = newLoop()
   let push = newPushSocket(loop)
@@ -341,7 +438,9 @@ proc bench_pushpull_1worker(cfg: BenchCfg) =
   pull.onMessage = proc(data: openArray[byte]) {.closure.} =
     recvTs.add(monoNs())
     inc received
-    if received >= N: loop.stop()
+    if received >= N:
+      finished = true
+      loop.stop()
   discard loop.addTimer(50) do (id: int):
     pull.connect(cfg.address, cfg.port, cfg.transport)
   var t0 = monoNs()
@@ -351,10 +450,13 @@ proc bench_pushpull_1worker(cfg: BenchCfg) =
       push.send(payload)
   loop.run()
   let elapsed = monoNs() - t0
-  var deltas: seq[int64]
-  for i in 1 ..< recvTs.len:
-    deltas.add(recvTs[i] - recvTs[i-1])
-  allRows.add BenchRow(label: "bench_pushpull_1worker" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  if finished:
+    var deltas: seq[int64]
+    for i in 1 ..< recvTs.len:
+      deltas.add(recvTs[i] - recvTs[i-1])
+    allRows.add BenchRow(label: "bench_pushpull_1worker" & transportSuffix(cfg.transport), subscriber: "-", n: N, size: PayloadLen, totalNs: elapsed, perMsgNs: deltas)
+  else:
+    echo "bench_pushpull_1worker: incomplete (", received, "/", N, ") — results discarded"
   pull.close()
   push.close()
   loop.close()
@@ -365,6 +467,7 @@ proc bench_pushpull_3workers(cfg: BenchCfg) =
   var payload = newString(PayloadLen)
   for i in 0 ..< PayloadLen: payload[i] = byte((i and 0x7F) + 32).char
   var received: array[3, int]
+  var finished = false
   var recvTs: array[3, seq[int64]]
   for i in 0 ..< 3: recvTs[i] = @[]
   let loop = newLoop()
@@ -377,7 +480,9 @@ proc bench_pushpull_3workers(cfg: BenchCfg) =
       inc received[i]
       var total = 0
       for j in 0 ..< 3: total += received[j]
-      if total >= N: loop.stop()
+      if total >= N:
+        finished = true
+        loop.stop()
   for i in 0 ..< 3:
     pulls[i] = newPullSocket(loop)
     pulls[i].onMessage = onMsg(i)
@@ -392,14 +497,19 @@ proc bench_pushpull_3workers(cfg: BenchCfg) =
   loop.run()
   let elapsed = monoNs() - t0
   let sfx = transportSuffix(cfg.transport)
-  var allDeltas: seq[int64]
-  for i in 0 ..< 3:
-    var wd: seq[int64]
-    for j in 1 ..< recvTs[i].len:
-      wd.add(recvTs[i][j] - recvTs[i][j-1])
-    allDeltas.add(wd)
-    allRows.add BenchRow(label: "bench_pushpull_3workers" & sfx, subscriber: &"worker{i}", n: received[i], size: PayloadLen, totalNs: elapsed, perMsgNs: wd)
-  allRows.add BenchRow(label: "bench_pushpull_3workers" & sfx, subscriber: "total", n: received[0]+received[1]+received[2], size: PayloadLen, totalNs: elapsed, perMsgNs: allDeltas)
+  proc deltas(ts: seq[int64]): seq[int64] =
+    result = newSeq[int64](max(0, ts.len - 1))
+    for i in 1 ..< ts.len:
+      result[i-1] = ts[i] - ts[i-1]
+  if finished:
+    var allDeltas: seq[int64]
+    for i in 0 ..< 3:
+      let wd = deltas(recvTs[i])
+      allDeltas.add(wd)
+      allRows.add BenchRow(label: "bench_pushpull_3workers" & sfx, subscriber: &"worker{i}", n: received[i], size: PayloadLen, totalNs: elapsed, perMsgNs: wd)
+    allRows.add BenchRow(label: "bench_pushpull_3workers" & sfx, subscriber: "total", n: received[0]+received[1]+received[2], size: PayloadLen, totalNs: elapsed, perMsgNs: allDeltas)
+  else:
+    echo "bench_pushpull_3workers: incomplete — results discarded"
   for i in 0 ..< 3: pulls[i].close()
   push.close()
   loop.close()

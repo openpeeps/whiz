@@ -199,8 +199,10 @@ proc sendReady*(zc: ZmtpConnection; socketType: string) =
   for c in socketType: body.add(byte(c))
   discard zc.sendCommand("READY", body)
 
-proc sendMessage*(zc: ZmtpConnection; data: openArray[byte]) =
-  discard zc.sendFrame(0, data)
+proc sendMessage*(zc: ZmtpConnection; data: openArray[byte]): bool {.discardable.} =
+  ## Returns true when the frame was accepted by the transport. False means
+  ## the underlying connection is dead or errored — the message was not sent.
+  zc.sendFrame(0, data) > 0
 
 proc close*(zc: ZmtpConnection) =
   if zc == nil: return

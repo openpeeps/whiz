@@ -49,10 +49,17 @@ proc setCurveClient*(req: ReqSocket; publicKey, secretKey, serverKey: array[32, 
 proc newReqSocket*(loop: Loop): ReqSocket =
   ReqSocket(loop: loop)
 
-proc send*(req: ReqSocket; data: string) =
+proc send*(req: ReqSocket; data: string): bool {.discardable.} =
+  ## Returns false when no request was sent (no connection, not established,
+  ## a reply is still pending, or the transport is dead).
   if req.conn != nil and req.conn.state == ZmtpEstablished and not req.waiting:
     req.waiting = true
-    req.conn.sendMessage(data.toOpenArrayByte(0, data.high))
+    if req.conn.sendMessage(data.toOpenArrayByte(0, data.high)):
+      return true
+    # Transport died mid-send; release the alternation lock so the socket
+    # does not wedge in `waiting` forever.
+    req.waiting = false
+  false
 
 proc close*(req: ReqSocket) =
   if req.conn != nil:
@@ -114,10 +121,16 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
 proc newRepSocket*(loop: Loop): RepSocket =
   RepSocket(loop: loop)
 
-proc send*(rep: RepSocket; data: string) =
+proc send*(rep: RepSocket; data: string): bool {.discardable.} =
+  ## Returns false when no reply was sent (no connection, not established,
+  ## no pending request, or the transport is dead).
   if rep.conn != nil and rep.conn.state == ZmtpEstablished and rep.hasRequest:
     rep.hasRequest = false
-    rep.conn.sendMessage(data.toOpenArrayByte(0, data.high))
+    if rep.conn.sendMessage(data.toOpenArrayByte(0, data.high)):
+      return true
+    # Transport died mid-send; allow a fresh request to be accepted.
+    rep.hasRequest = true
+  false
 
 proc close*(rep: RepSocket) =
   if rep.conn != nil:
@@ -164,7 +177,15 @@ proc `bind`*(rep: RepSocket; address: string; port: int = 0;
       ps.conn = nil
       if ps.onClose != nil: ps.onClose()
 
-  ps.server = newTcpServer(rep.loop, onAccept = onAccept, onData = feedData)
+  proc onConnClosed(conn: Connection) =
+    let zc = cast[ZmtpConnection](conn.data)
+    if zc != nil and zc.state != ZmtpClosed:
+      zc.state = ZmtpClosed
+      ps.hasRequest = false
+      if zc.onClose != nil: zc.onClose(zc)
+
+  ps.server = newTcpServer(rep.loop, onAccept = onAccept, onData = feedData,
+                           onClose = onConnClosed)
   case transport
   of TransportTcp:
     ps.server.listen(address, port)

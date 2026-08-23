@@ -49,14 +49,17 @@ proc setCurveClient*(push: PushSocket; publicKey, secretKey, serverKey: array[32
 proc newPushSocket*(loop: Loop): PushSocket =
   PushSocket(loop: loop, conns: @[], rrIndex: 0)
 
-proc send*(push: PushSocket; data: string) =
-  if push.conns.len == 0: return
+proc send*(push: PushSocket; data: string): bool {.discardable.} =
+  ## Round-robins to the next connected PULL. Returns false when nothing was
+  ## sent (no workers, or the selected worker's transport is dead).
+  if push.conns.len == 0: return false
   if push.rrIndex >= push.conns.len: push.rrIndex = 0
   let idx = push.rrIndex
   push.rrIndex = (push.rrIndex + 1) mod push.conns.len
   let zc = push.conns[idx]
   if zc.state == ZmtpEstablished:
-    zc.sendMessage(data.toOpenArrayByte(0, data.high))
+    return zc.sendMessage(data.toOpenArrayByte(0, data.high))
+  false
 
 proc close*(push: PushSocket) =
   for zc in push.conns:
@@ -95,7 +98,14 @@ proc `bind`*(push: PushSocket; address: string; port: int = 0;
       if ps.conns.len == 0 and ps.onClose != nil:
         ps.onClose()
 
-  ps.server = newTcpServer(ps.loop, onAccept = onAccept, onData = feedData)
+  proc onConnClosed(conn: Connection) =
+    let zc = cast[ZmtpConnection](conn.data)
+    if zc != nil and zc.state != ZmtpClosed:
+      zc.state = ZmtpClosed
+      if zc.onClose != nil: zc.onClose(zc)
+
+  ps.server = newTcpServer(ps.loop, onAccept = onAccept, onData = feedData,
+                           onClose = onConnClosed)
   case transport
   of TransportTcp:
     ps.server.listen(address, port)
@@ -155,11 +165,14 @@ proc connect*(push: PushSocket; address: string; port: int = 0;
 proc newPullSocket*(loop: Loop): PullSocket =
   PullSocket(loop: loop, conns: @[])
 
-proc send*(pull: PullSocket; data: string) =
-  if pull.conns.len == 0: return
+proc send*(pull: PullSocket; data: string): bool {.discardable.} =
+  ## Sends to the most recently connected PUSH peer. Returns false when
+  ## nothing was sent (no peers, or that peer's transport is dead).
+  if pull.conns.len == 0: return false
   let zc = pull.conns[^1]
   if zc.state == ZmtpEstablished:
-    zc.sendMessage(data.toOpenArrayByte(0, data.high))
+    return zc.sendMessage(data.toOpenArrayByte(0, data.high))
+  false
 
 proc close*(pull: PullSocket) =
   for zc in pull.conns:
@@ -203,7 +216,14 @@ proc `bind`*(pull: PullSocket; address: string; port: int = 0;
 
     ps.conns.add(zc)
 
-  ps.server = newTcpServer(ps.loop, onAccept = onAccept, onData = feedData)
+  proc onConnClosed(conn: Connection) =
+    let zc = cast[ZmtpConnection](conn.data)
+    if zc != nil and zc.state != ZmtpClosed:
+      zc.state = ZmtpClosed
+      if zc.onClose != nil: zc.onClose(zc)
+
+  ps.server = newTcpServer(ps.loop, onAccept = onAccept, onData = feedData,
+                           onClose = onConnClosed)
   case transport
   of TransportTcp:
     ps.server.listen(address, port)

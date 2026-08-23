@@ -57,10 +57,13 @@ proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
 proc newPairSocket*(loop: Loop): PairSocket =
   PairSocket(loop: loop)
 
-proc send*(pair: PairSocket; data: string) =
+proc send*(pair: PairSocket; data: string): bool {.discardable.} =
+  ## Returns false when the message was not delivered (no connection,
+  ## handshake incomplete, or the underlying transport is dead).
   if pair.conn != nil:
     if pair.conn.state == ZmtpEstablished:
-      pair.conn.sendMessage(data.toOpenArrayByte(0, data.high))
+      return pair.conn.sendMessage(data.toOpenArrayByte(0, data.high))
+  false
 
 proc close*(pair: PairSocket) =
   if pair.conn != nil:
@@ -101,7 +104,14 @@ proc `bind`*(pair: PairSocket; address: string; port: int = 0;
       ps.conn = nil
       if ps.onClose != nil: ps.onClose()
 
-  ps.server = newTcpServer(pair.loop, onAccept = onAccept, onData = feedData)
+  proc onConnClosed(conn: Connection) =
+    let zc = cast[ZmtpConnection](conn.data)
+    if zc != nil and zc.state != ZmtpClosed:
+      zc.state = ZmtpClosed
+      if zc.onClose != nil: zc.onClose(zc)
+
+  ps.server = newTcpServer(pair.loop, onAccept = onAccept, onData = feedData,
+                           onClose = onConnClosed)
   case transport
   of TransportTcp:
     ps.server.listen(address, port)
