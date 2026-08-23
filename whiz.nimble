@@ -10,7 +10,7 @@ srcDir        = "src"
 # Dependencies
 
 requires "nim >= 2.2.0"
-requires "powpow >= 0.1.4"
+requires "powpow >= 0.1.10"
 requires "e2ee >= 0.1.0"
 
 
