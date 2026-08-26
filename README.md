@@ -1,5 +1,4 @@
 <p align="center">
-  <img src="https://github.com/openpeeps/PKG/blob/main/.github/logo.png" width="90px"><br>
   WhizMQ - A message queue library implementing ZMTP 3.0 in Nim.<br>
   Built on top of <a href="https://github.com/openpeeps/powpow">PowPow event library</a>
 </p>
