@@ -2,7 +2,7 @@
 
 import whiz/pair
 import whiz/curve
-import std/[unittest, os]
+import std/unittest
 
 var nextPort = 26000
 proc allocPort: int = result = nextPort; inc nextPort

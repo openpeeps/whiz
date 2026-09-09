@@ -15,16 +15,16 @@
 
 ## 😍 Key Features
 - **ZMTP 3.0** wire protocol, full greeting, framing, and command handling
-- **Socket patterns**: PAIR, PUB/SUB, REQ/REP, PUSH/PULL, File Transfer
+- **Socket patterns**: PAIR, PUB/SUB, REQ/REP, PUSH/PULL, CLIENT/SERVER, File Transfer
 - **Security mechanisms**:
   - NULL: no authentication (plaintext)
   - PLAIN: username/password authentication with ZAP callback
   - CURVE: X25519 + XChaCha20-Poly1305 AEAD encryption and mutual authentication
-- **Transport** TCP and IPC (Unix domain sockets)
+- **Transport** TCP (with optional TLS on POSIX), IPC (Unix domain sockets), and WebSocket (RFC 6455)
 - **Built on [PowPow](https://github.com/openpeeps/powpow)** event notification library in Nim
 
 > [!NOTE]
-> CURVE requires [Monocypher](https://monocypher.org) (via the [e2ee](https://github.com/openpeeps/e2ee) package). Install it with your system package manager (`brew install monocypher`, `apt install libmonocypher-dev`, etc.) or build from source.
+> CURVE is powered by [nimcypher](https://github.com/openpeeps/nimcypher), a 100% pure-Nim port of Monocypher 4.0.3 — no C compiler flags, no system libraries to install.
 
 ## 🗺 Roadmap
 
@@ -34,11 +34,11 @@
 - [x] PLAIN security mechanism + ZAP auth callbacks
 - [x] CURVE security mechanism (X25519 + AEAD)
 - [ ] RADIO/DISH (dgram) socket pattern
-- [ ] CLIENT/SERVER (stream) socket pattern
+- [x] CLIENT/SERVER (stream) socket pattern
 - [ ] CURVE vouch (Ed25519 signature in HELLO for key continuity)
 - [ ] TLS/DTLS transport
 - [ ] GSSAPI / Kerberos mechanism
-- [ ] WebSocket transport (RFC 7692)
+- [x] WebSocket transport (RFC 6455)
 - [ ] Formal ZMTP conformance tests
 - [ ] Performance benchmarks vs ØMQ
 

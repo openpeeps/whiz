@@ -11,8 +11,9 @@ import powpow/[loop, types, net/tcp]
 import ./zmtp
 import ./auth
 import ./curve
+import ./tls
 
-export tcp, loop, types, zmtp, auth, curve
+export tcp, loop, types, zmtp, auth, curve, tls
 
 # ── TopicHub (in-process pub/sub) ──────────────────────────────────────────
 
@@ -59,6 +60,7 @@ type
     subs: seq[Subscriber]
     authMech: string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
+    tls: TlsConfig
 
   SubSocket* = ref object
     loop: Loop
@@ -68,6 +70,7 @@ type
     onClose*: proc() {.closure.}
     authMech: string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
+    tls: TlsConfig
 
 proc setCurveKeypair*(pub: PubSocket; publicKey, secretKey: array[32, uint8]) =
   pub.authMech = "CURVE"
@@ -79,6 +82,16 @@ proc setCurveClient*(sub: SubSocket; publicKey, secretKey, serverKey: array[32, 
   sub.authPubKey = publicKey
   sub.authSecKey = secretKey
   sub.authSrvKey = serverKey
+
+proc setTlsServer*(s: PubSocket | SubSocket; certFile, keyFile: string) =
+  ## Enables TLS for accepted connections (TCP only, POSIX only). Call
+  ## before bind. Raises SslError when the cert and key do not match.
+  enableTlsServer(s.tls, certFile, keyFile)
+
+proc setTlsClient*(s: PubSocket | SubSocket; verifyPeer = true; serverName = "") =
+  ## Enables TLS for outbound connections (TCP only, POSIX only). Call
+  ## before connect. Pass verifyPeer=false for self-signed test certs.
+  enableTlsClient(s.tls, verifyPeer, serverName)
 
 # ── PubSocket ────────────────────────────────────────────────────────────────
 
@@ -92,6 +105,7 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
+    if transport == TransportTcp and not wrapServerConn(conn, ps.tls): return
     let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PUB"
@@ -167,6 +181,7 @@ proc newSubSocket*(loop: Loop): SubSocket =
 proc connect*(sub: SubSocket; address: string; port: int = 0;
               transport: Transport = TransportTcp) =
   proc onConnect(conn: Connection) =
+    if transport == TransportTcp and not wrapClientConn(conn, sub.tls): return
     let mech = if sub.authMech.len > 0: sub.authMech else: "NULL"
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "SUB"

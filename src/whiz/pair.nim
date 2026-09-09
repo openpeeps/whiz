@@ -10,8 +10,9 @@ import powpow/[loop, types, net/tcp]
 import ./zmtp
 import ./auth
 import ./curve
+import ./tls
 
-export loop, types, tcp, zmtp, auth, curve
+export loop, types, tcp, zmtp, auth, curve, tls
 
 type
   PairSocket* = ref object
@@ -24,6 +25,7 @@ type
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
     authUser, authPass: string
     authZapHandler: ZapHandler
+    tls: TlsConfig
 
 proc setCurveKeypair*(pair: PairSocket; publicKey, secretKey: array[32, uint8]) =
   pair.authMech = "CURVE"
@@ -43,6 +45,16 @@ proc setPlainAuth*(pair: PairSocket; username, password: string) =
 
 proc onAuthenticate*(pair: PairSocket; handler: ZapHandler) =
   pair.authZapHandler = handler
+
+proc setTlsServer*(pair: PairSocket; certFile, keyFile: string) =
+  ## Enables TLS for accepted connections (TCP only, POSIX only). Call
+  ## before bind. Raises SslError when the cert and key do not match.
+  enableTlsServer(pair.tls, certFile, keyFile)
+
+proc setTlsClient*(pair: PairSocket; verifyPeer = true; serverName = "") =
+  ## Enables TLS for outbound connections (TCP only, POSIX only). Call
+  ## before connect. Pass verifyPeer=false for self-signed test certs.
+  enableTlsClient(pair.tls, verifyPeer, serverName)
 
 proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
   if pair.authMech == "PLAIN":
@@ -83,6 +95,7 @@ proc `bind`*(pair: PairSocket; address: string; port: int = 0;
     if zc != nil: zc.feed(data)
 
   proc onAccept(conn: Connection) =
+    if transport == TransportTcp and not wrapServerConn(conn, ps.tls): return
     let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PAIR"
@@ -126,6 +139,7 @@ proc connect*(pair: PairSocket; address: string; port: int = 0;
   let ps = pair
 
   proc setupConn(conn: Connection) =
+    if transport == TransportTcp and not wrapClientConn(conn, ps.tls): return
     let mech = if ps.authMech.len > 0: ps.authMech else: "NULL"
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PAIR"

@@ -6,11 +6,12 @@
 
 ## CURVE security mechanism for ZMTP.
 ##
-## Implements the ZMTP CURVE security mechanism using Monocypher's
-## X25519 key exchange and XChaCha20-Poly1305 AEAD encryption.
+## Implements the ZMTP CURVE security mechanism using nimcypher's
+## (pure-Nim Monocypher port) X25519 key exchange and
+## XChaCha20-Poly1305 AEAD encryption.
 
 import std/[sequtils]
-import e2ee/private/[monocypher, utils]
+import nimcypher
 import ./zmtp
 
 export zmtp
@@ -39,17 +40,19 @@ type
     recvCtr*: uint64
 
 proc generateCurveKeypair*(): tuple[secret: Key32, public: Key32] =
-  result = x25519KeyPair()
+  let kp = x25519KeyPair()
+  result.secret = kp[0]
+  result.public = kp[1]
 
 # ── Key derivation ──────────────────────────────────────────────────────────
 
 proc deriveKeys(cs: CurveState; ecdhEE, ecdhCE, ecdhSE: Key32) =
-  var ctx: crypto_blake2b_ctx
-  crypto_blake2b_init(addr ctx, 64)
-  crypto_blake2b_update(addr ctx, addr ecdhEE[0], 32)
-  crypto_blake2b_update(addr ctx, addr ecdhCE[0], 32)
-  crypto_blake2b_update(addr ctx, addr ecdhSE[0], 32)
-  crypto_blake2b_final(addr ctx, addr cs.masterKey[0])
+  var h = initBlake2b(64)
+  h.update(ecdhEE)
+  h.update(ecdhCE)
+  h.update(ecdhSE)
+  let mk = h.finish()
+  copyMem(addr cs.masterKey[0], unsafeAddr mk[0], 64)
   # client→server key: first 32 bytes of master
   copyMem(addr cs.sendKey[0], addr cs.masterKey[0], 32)
   # server→client key: second 32 bytes of master
@@ -67,36 +70,23 @@ proc makeNonce(counter: uint64): array[24, uint8] =
 
 proc curveEncrypt(key: Key32; ctr: var uint64; data: var seq[byte]): bool =
   let nonce = makeNonce(ctr)
-  var mac: Mac16
-  var cipher = newSeq[byte](data.len)
-  if data.len > 0:
-    crypto_aead_lock(
-      addr cipher[0], addr mac[0],
-      addr key[0], addr nonce[0],
-      nil, 0,
-      addr data[0], csize_t(data.len)
-    )
+  let (cipher, mac) = encrypt(data, key, nonce)
   data = concat(cipher, @(mac))
   inc ctr
   true
 
 proc curveDecrypt(key: Key32; ctr: var uint64; data: var seq[byte]): bool =
-  let nonce = makeNonce(ctr)
   if data.len < 16: return false
+  let nonce = makeNonce(ctr)
   let origLen = data.len - 16
-  var plain = newSeq[byte](origLen)
-  let res = crypto_aead_unlock(
-    if origLen > 0: addr plain[0] else: nil,
-    addr data[origLen],
-    addr key[0], addr nonce[0],
-    nil, 0,
-    if origLen > 0: addr data[0] else: nil,
-    csize_t(origLen)
-  )
-  if res != 0: return false
-  data = plain
-  inc ctr
-  true
+  var mac: Mac16
+  copyMem(addr mac[0], addr data[origLen], 16)
+  try:
+    data = decrypt(data[0 ..< origLen], mac, key, nonce)
+    inc ctr
+    true
+  except ValueError:
+    false
 
 # ── Property helpers ────────────────────────────────────────────────────────
 
@@ -154,11 +144,11 @@ proc installCryptoHooks(zc: ZmtpConnection; cs: CurveState) =
     zc.mechDecrypt = proc(zc: ZmtpConnection; data: var seq[byte]): bool =
       curveDecrypt(cs.recvKey, cs.recvCtr, data)
   zc.mechDestroy = proc(zc: ZmtpConnection) =
-    crypto_wipe(addr cs.sendKey[0], 32)
-    crypto_wipe(addr cs.recvKey[0], 32)
-    crypto_wipe(addr cs.masterKey[0], 64)
-    crypto_wipe(addr cs.permSecret[0], 32)
-    crypto_wipe(addr cs.ephSecret[0], 32)
+    cs.sendKey.wipe()
+    cs.recvKey.wipe()
+    cs.masterKey.wipe()
+    cs.permSecret.wipe()
+    cs.ephSecret.wipe()
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -179,9 +169,9 @@ proc setupCurveHandshake*(zc: ZmtpConnection; cs: CurveState) =
         copyMem(addr cs.peerEphPublic[0], unsafeAddr body[dataOff + 32], 32)
         (cs.ephSecret, cs.ephPublic) = x25519KeyPair()
         var ecdhEE, ecdhCE, ecdhSE: Key32
-        crypto_x25519(addr ecdhEE[0], addr cs.ephSecret[0], addr cs.peerEphPublic[0])
-        crypto_x25519(addr ecdhCE[0], addr cs.ephSecret[0], addr cs.peerPermPublic[0])
-        crypto_x25519(addr ecdhSE[0], addr cs.permSecret[0], addr cs.peerEphPublic[0])
+        ecdhEE = sharedSecret(cs.ephSecret, cs.peerEphPublic).data
+        ecdhCE = sharedSecret(cs.ephSecret, cs.peerPermPublic).data
+        ecdhSE = sharedSecret(cs.permSecret, cs.peerEphPublic).data
         deriveKeys(cs, ecdhEE, ecdhCE, ecdhSE)
         discard zc.sendCommand("WELCOME", @(cs.ephPublic))
         cs.phase = cpWaitInitiate
@@ -216,9 +206,9 @@ proc setupCurveHandshake*(zc: ZmtpConnection; cs: CurveState) =
         if dataLen < 32: return false
         copyMem(addr cs.peerEphPublic[0], unsafeAddr body[dataOff], 32)
         var ecdhEE, ecdhCE, ecdhSE: Key32
-        crypto_x25519(addr ecdhEE[0], addr cs.ephSecret[0], addr cs.peerEphPublic[0])
-        crypto_x25519(addr ecdhCE[0], addr cs.permSecret[0], addr cs.peerEphPublic[0])
-        crypto_x25519(addr ecdhSE[0], addr cs.ephSecret[0], addr cs.serverPub[0])
+        ecdhEE = sharedSecret(cs.ephSecret, cs.peerEphPublic).data
+        ecdhCE = sharedSecret(cs.permSecret, cs.peerEphPublic).data
+        ecdhSE = sharedSecret(cs.ephSecret, cs.serverPub).data
         deriveKeys(cs, ecdhEE, ecdhCE, ecdhSE)
         var initBody = buildProps(zc.socketType)
         if not curveEncrypt(cs.sendKey, cs.sendCtr, initBody): return false

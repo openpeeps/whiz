@@ -41,6 +41,10 @@ const
   ZmtpLong*    = 0x02
   ZmtpCommand* = 0x04
 
+  # Upper bound for one reassembled multipart message. Connections that
+  # exceed it are closed with an error instead of growing unboundedly.
+  MaxMultipartBytes* = 32 * 1024 * 1024
+
 type
   ZmtpState* = enum
     ZmtpGreeting
@@ -62,6 +66,13 @@ type
     recvLen:      int
     onReady*:     proc(zc: ZmtpConnection) {.closure.}
     onMessage*:   proc(zc: ZmtpConnection; data: openArray[byte]) {.closure.}
+    # Opt-in multipart delivery. When set, incoming data frames are
+    # accumulated while ZmtpMore is present and delivered as one message
+    # once the final frame arrives (single-frame messages arrive as a
+    # one-element seq). When nil, each frame goes to onMessage as before.
+    onMultipart*: proc(zc: ZmtpConnection; frames: seq[seq[byte]]) {.closure.}
+    pendingFrames: seq[seq[byte]]
+    pendingBytes: int
     onSubscribe*: proc(zc: ZmtpConnection; topic: openArray[byte]) {.closure.}
     onUnsubscribe*: proc(zc: ZmtpConnection; topic: openArray[byte]) {.closure.}
     onError*:     proc(zc: ZmtpConnection; reason: string) {.closure.}
@@ -203,6 +214,15 @@ proc sendMessage*(zc: ZmtpConnection; data: openArray[byte]): bool {.discardable
   ## Returns true when the frame was accepted by the transport. False means
   ## the underlying connection is dead or errored — the message was not sent.
   zc.sendFrame(0, data) > 0
+
+proc sendMultipart*(zc: ZmtpConnection; frames: openArray[seq[byte]]): bool {.discardable.} =
+  ## Sends a multipart message. Every frame but the last carries ZmtpMore.
+  ## Returns true only when every frame was accepted by the transport.
+  if zc.state != ZmtpEstablished: return false
+  for i, f in frames:
+    let flags = if i < frames.len - 1: ZmtpMore.byte else: 0.byte
+    if zc.sendFrame(flags, f) <= 0: return false
+  true
 
 proc close*(zc: ZmtpConnection) =
   if zc == nil: return
@@ -381,6 +401,27 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
       elif (flags and ZmtpCommand) != 0:
         if body != nil and bodyLen > 0:
           handleCommand(zc, body, bodyLen)
+        zc.consume(consumed)
+      elif zc.onMultipart != nil:
+        var frame = newSeq[byte](bodyLen)
+        if bodyLen > 0:
+          copyMem(addr frame[0], body, bodyLen)
+          if zc.mechDecrypt != nil and not zc.mechDecrypt(zc, frame):
+            if zc.onError != nil: zc.onError(zc, "Decryption failed")
+            zc.state = ZmtpClosed
+            done = true
+        if zc.state != ZmtpClosed:
+          zc.pendingFrames.add(frame)
+          zc.pendingBytes += bodyLen
+          if zc.pendingBytes > MaxMultipartBytes:
+            if zc.onError != nil: zc.onError(zc, "Multipart message too large")
+            zc.state = ZmtpClosed
+            done = true
+          elif (flags and ZmtpMore) == 0:
+            let msg = zc.pendingFrames
+            zc.pendingFrames = @[]
+            zc.pendingBytes = 0
+            zc.onMultipart(zc, msg)
         zc.consume(consumed)
       else:
         if body != nil and bodyLen > 0:
