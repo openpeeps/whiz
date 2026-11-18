@@ -17,6 +17,7 @@ export loop, types, tcp, zmtp, auth, curve, tls
 type
   ReqSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     conn:       ZmtpConnection
     waiting:    bool
     onReply*:   proc(data: openArray[byte]) {.closure.}
@@ -32,6 +33,7 @@ type
 
   RepSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     conn:       ZmtpConnection
     server:     TcpServer
     hasRequest: bool
@@ -99,7 +101,15 @@ proc pendingBytes*(s: ReqSocket | RepSocket): int =
 # ── REQ ─────────────────────────────────────────────────────────────────────
 
 proc newReqSocket*(loop: Loop): ReqSocket =
-  ReqSocket(loop: loop)
+  ReqSocket(loop: loop, ownsLoop: false)
+
+proc newReqSocket*(): ReqSocket =
+  ## Creates a REQ socket with its own event loop.
+  ReqSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: ReqSocket): Loop {.inline.} = s.loop
+proc run*(s: ReqSocket) {.inline.} = s.loop.run()
+proc stop*(s: ReqSocket) {.inline.} = s.loop.stop()
 
 proc send*(req: ReqSocket; data: string): bool {.discardable.} =
   ## Returns false when no request was sent (no connection, not established,
@@ -118,6 +128,8 @@ proc close*(req: ReqSocket) =
     req.conn.close()
     req.conn = nil
   if req.onClose != nil: req.onClose()
+  if req.ownsLoop and req.loop != nil:
+    req.loop.close()
 
 proc connect*(req: ReqSocket; address: string; port: int = 0;
               transport: Transport = TransportTcp) =
@@ -180,7 +192,15 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
 # ── REP ─────────────────────────────────────────────────────────────────────
 
 proc newRepSocket*(loop: Loop): RepSocket =
-  RepSocket(loop: loop)
+  RepSocket(loop: loop, ownsLoop: false)
+
+proc newRepSocket*(): RepSocket =
+  ## Creates a REP socket with its own event loop.
+  RepSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: RepSocket): Loop {.inline.} = s.loop
+proc run*(s: RepSocket) {.inline.} = s.loop.run()
+proc stop*(s: RepSocket) {.inline.} = s.loop.stop()
 
 proc send*(rep: RepSocket; data: string): bool {.discardable.} =
   ## Returns false when no reply was sent (no connection, not established,
@@ -201,6 +221,8 @@ proc close*(rep: RepSocket) =
   if rep.server != nil:
     rep.server.close()
     rep.server = nil
+  if rep.ownsLoop and rep.loop != nil:
+    rep.loop.close()
 
 proc `bind`*(rep: RepSocket; address: string; port: int = 0;
              transport: Transport = TransportTcp) =

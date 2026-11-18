@@ -89,7 +89,13 @@ proc makeNonce(counter: uint64): array[24, uint8] =
 proc curveEncrypt(key: Key32; ctr: var uint64; data: var seq[byte]): bool =
   let nonce = makeNonce(ctr)
   let (cipher, mac) = encrypt(data, key, nonce)
-  data = concat(cipher, @(mac))
+  # Single output alloc: grow in place instead of concat(cipher, mac).
+  # (Full zero-alloc needs a one-shot encryptInto in nimcypher.)
+  let total = cipher.len + 16
+  data.setLen(total)
+  if cipher.len > 0:
+    copyMem(addr data[0], unsafeAddr cipher[0], cipher.len)
+  copyMem(addr data[cipher.len], unsafeAddr mac[0], 16)
   inc ctr
   true
 

@@ -22,10 +22,19 @@ type
 
   TopicHub* = ref object
     loop: Loop
+    ownsLoop: bool
     subs: Table[string, seq[TopicHandler]]
 
 proc newTopicHub*(loop: Loop): TopicHub =
-  TopicHub(loop: loop, subs: initTable[string, seq[TopicHandler]]())
+  TopicHub(loop: loop, subs: initTable[string, seq[TopicHandler]](), ownsLoop: false)
+
+proc newTopicHub*(): TopicHub =
+  ## Creates a hub with its own event loop.
+  TopicHub(loop: newLoop(), subs: initTable[string, seq[TopicHandler]](), ownsLoop: true)
+
+proc getLoop*(h: TopicHub): Loop {.inline.} = h.loop
+proc run*(h: TopicHub) {.inline.} = h.loop.run()
+proc stop*(h: TopicHub) {.inline.} = h.loop.stop()
 
 proc subscribe*(hub: TopicHub; topic: string; handler: TopicHandler) =
   if hub.subs.hasKey(topic):
@@ -56,6 +65,7 @@ type
 
   PubSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     server: TcpServer
     subs: seq[Subscriber]
     authMech: string
@@ -69,6 +79,7 @@ type
 
   SubSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     pubConns: seq[ZmtpConnection]
     subscriptions: seq[string]
     onMessage*: proc(topic: openArray[byte]; data: openArray[byte]) {.closure.}
@@ -144,7 +155,7 @@ proc pendingBytes*(sub: SubSocket): int =
 
 proc newPubSocket*(loop: Loop; address: string; port: int = 0;
                    transport: Transport = TransportTcp): PubSocket =
-  result = PubSocket(loop: loop, subs: @[])
+  result = PubSocket(loop: loop, subs: @[], ownsLoop: false)
   let ps = result
 
   proc feedData(conn: Connection; data: openArray[byte]) =
@@ -203,12 +214,27 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
     else:
       raise newException(NetError, "Unix sockets not supported on Windows")
 
+proc newPubSocket*(address: string; port: int = 0;
+                   transport: Transport = TransportTcp): PubSocket =
+  ## Creates a PUB socket with its own event loop and binds immediately.
+  result = newPubSocket(newLoop(), address, port, transport)
+  result.ownsLoop = true
+
+proc getLoop*(s: PubSocket): Loop {.inline.} = s.loop
+proc getLoop*(s: SubSocket): Loop {.inline.} = s.loop
+proc run*(s: PubSocket) {.inline.} = s.loop.run()
+proc run*(s: SubSocket) {.inline.} = s.loop.run()
+proc stop*(s: PubSocket) {.inline.} = s.loop.stop()
+proc stop*(s: SubSocket) {.inline.} = s.loop.stop()
+
 proc close*(pub: PubSocket) =
   for sub in pub.subs:
     sub.zc.close()
   pub.subs.setLen(0)
   if pub.server != nil:
     pub.server.close()
+  if pub.ownsLoop and pub.loop != nil:
+    pub.loop.close()
 
 proc publish*(pub: PubSocket; data: string): bool {.discardable.} =
   ## Sends to every subscriber with a matching topic. Returns true when no
@@ -227,7 +253,12 @@ proc publish*(pub: PubSocket; data: string): bool {.discardable.} =
 # ── SubSocket ────────────────────────────────────────────────────────────────
 
 proc newSubSocket*(loop: Loop): SubSocket =
-  SubSocket(loop: loop, pubConns: @[], subscriptions: @[])
+  SubSocket(loop: loop, pubConns: @[], subscriptions: @[], ownsLoop: false)
+
+proc newSubSocket*(): SubSocket =
+  ## Creates a SUB socket with its own event loop.
+  SubSocket(loop: newLoop(), pubConns: @[], subscriptions: @[], ownsLoop: true)
+
 
 proc connect*(sub: SubSocket; address: string; port: int = 0;
               transport: Transport = TransportTcp) =
@@ -291,6 +322,8 @@ proc close*(sub: SubSocket) =
   for zc in sub.pubConns:
     zc.close()
   sub.pubConns.setLen(0)
+  if sub.ownsLoop and sub.loop != nil:
+    sub.loop.close()
 
 proc subscribe*(sub: SubSocket; topic: string) =
   if topic notin sub.subscriptions:

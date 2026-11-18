@@ -58,6 +58,7 @@ proc wsSendGreeting(zc: ZmtpConnection, ws: WsConnection) =
 type
   WsPairSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     wss: WsServer
     ws: WsConnection
     zc: ZmtpConnection
@@ -66,8 +67,16 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsPairSocket*(loop: Loop): WsPairSocket =
-  WsPairSocket(loop: loop)
+  WsPairSocket(loop: loop, ownsLoop: false)
 
+proc newWsPairSocket*(): WsPairSocket =
+  ## Creates a WS PAIR socket with its own event loop.
+  WsPairSocket(loop: newLoop(), ownsLoop: true)
+
+
+proc getLoop*(s: WsPairSocket): Loop {.inline.} = s.loop
+proc run*(s: WsPairSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsPairSocket) {.inline.} = s.loop.stop()
 proc send*(s: WsPairSocket; data: string): bool {.discardable.} =
   if s.zc != nil and s.zc.state == ZmtpEstablished:
     return s.zc.sendMessage(data.toOpenArrayByte(0, data.high))
@@ -81,11 +90,22 @@ proc close*(s: WsPairSocket) =
     s.wss.close()
     s.wss = nil
   if s.onClose != nil: s.onClose()
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc pendingBytes*(s: WsPairSocket): int =
   ## Bytes queued in the underlying WS/TCP write buffers (0 = drained).
   if s.ws != nil: s.ws.pendingBytes()
   elif s.zc != nil: s.zc.pendingBytes()
+  else: 0
+
+proc sendScratchCap*(s: WsPairSocket): int =
+  ## Capacity of the per-connection WS-framing scratch pool (0 = no session).
+  if s.zc != nil: s.zc.sendScratchCap()
+  else: 0
+
+proc sendScratchLen*(s: WsPairSocket): int =
+  if s.zc != nil: s.zc.sendScratchLen()
   else: 0
 
 proc `bind`*(s: WsPairSocket; address: string; port: int;
@@ -164,11 +184,19 @@ type
 
   WsPubSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     wss: WsServer
     subs: seq[WsSubscriber]
 
 proc newWsPubSocket*(loop: Loop): WsPubSocket =
-  WsPubSocket(loop: loop, subs: @[])
+  WsPubSocket(loop: loop, subs: @[], ownsLoop: false)
+
+proc newWsPubSocket*(): WsPubSocket =
+  WsPubSocket(loop: newLoop(), subs: @[], ownsLoop: true)
+
+proc getLoop*(s: WsPubSocket): Loop {.inline.} = s.loop
+proc run*(s: WsPubSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsPubSocket) {.inline.} = s.loop.stop()
 
 proc close*(s: WsPubSocket) =
   for sub in s.subs:
@@ -176,6 +204,8 @@ proc close*(s: WsPubSocket) =
   s.subs.setLen(0)
   if s.wss != nil:
     s.wss.close()
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc publish*(s: WsPubSocket; data: string): bool {.discardable.} =
   result = true
@@ -228,6 +258,7 @@ proc `bind`*(s: WsPubSocket; address: string; port: int;
 type
   WsSubSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     ws: seq[WsConnection]
     zcs: seq[ZmtpConnection]
     subscriptions: seq[string]
@@ -235,13 +266,22 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsSubSocket*(loop: Loop): WsSubSocket =
-  WsSubSocket(loop: loop, ws: @[], zcs: @[], subscriptions: @[])
+  WsSubSocket(loop: loop, ws: @[], zcs: @[], subscriptions: @[], ownsLoop: false)
+
+proc newWsSubSocket*(): WsSubSocket =
+  WsSubSocket(loop: newLoop(), ws: @[], zcs: @[], subscriptions: @[], ownsLoop: true)
+
+proc getLoop*(s: WsSubSocket): Loop {.inline.} = s.loop
+proc run*(s: WsSubSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsSubSocket) {.inline.} = s.loop.stop()
 
 proc close*(s: WsSubSocket) =
   for zc in s.zcs:
     zc.close()
   s.zcs.setLen(0)
   s.ws.setLen(0)
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc subscribe*(s: WsSubSocket; topic: string) =
   if topic notin s.subscriptions:
@@ -321,6 +361,7 @@ proc connect*(s: WsSubSocket; address: string; port: int; path: string = "/";
 type
   WsReqSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     ws: WsConnection
     zc: ZmtpConnection
     conn: Connection
@@ -329,7 +370,14 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsReqSocket*(loop: Loop): WsReqSocket =
-  WsReqSocket(loop: loop)
+  WsReqSocket(loop: loop, ownsLoop: false)
+
+proc newWsReqSocket*(): WsReqSocket =
+  WsReqSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: WsReqSocket): Loop {.inline.} = s.loop
+proc run*(s: WsReqSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsReqSocket) {.inline.} = s.loop.stop()
 
 proc send*(s: WsReqSocket; data: string): bool {.discardable.} =
   if s.zc != nil and s.zc.state == ZmtpEstablished and not s.waiting:
@@ -344,6 +392,8 @@ proc close*(s: WsReqSocket) =
     s.zc.close()
     s.zc = nil
   if s.onClose != nil: s.onClose()
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc pendingBytes*(s: WsReqSocket): int =
   if s.ws != nil: s.ws.pendingBytes()
@@ -390,6 +440,7 @@ proc connect*(s: WsReqSocket; address: string; port: int; path: string = "/";
 type
   WsRepSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     wss: WsServer
     ws: WsConnection
     zc: ZmtpConnection
@@ -398,7 +449,14 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsRepSocket*(loop: Loop): WsRepSocket =
-  WsRepSocket(loop: loop)
+  WsRepSocket(loop: loop, ownsLoop: false)
+
+proc newWsRepSocket*(): WsRepSocket =
+  WsRepSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: WsRepSocket): Loop {.inline.} = s.loop
+proc run*(s: WsRepSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsRepSocket) {.inline.} = s.loop.stop()
 
 proc send*(s: WsRepSocket; data: string): bool {.discardable.} =
   if s.zc != nil and s.zc.state == ZmtpEstablished and s.hasRequest:
@@ -416,6 +474,8 @@ proc close*(s: WsRepSocket) =
   if s.wss != nil:
     s.wss.close()
     s.wss = nil
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc pendingBytes*(s: WsRepSocket): int =
   if s.ws != nil: s.ws.pendingBytes()
@@ -457,6 +517,7 @@ proc `bind`*(s: WsRepSocket; address: string; port: int;
 type
   WsPushSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     wss: WsServer
     ws: seq[WsConnection]
     zcs: seq[ZmtpConnection]
@@ -464,7 +525,14 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsPushSocket*(loop: Loop): WsPushSocket =
-  WsPushSocket(loop: loop, ws: @[], zcs: @[], rrIndex: 0)
+  WsPushSocket(loop: loop, ws: @[], zcs: @[], rrIndex: 0, ownsLoop: false)
+
+proc newWsPushSocket*(): WsPushSocket =
+  WsPushSocket(loop: newLoop(), ws: @[], zcs: @[], rrIndex: 0, ownsLoop: true)
+
+proc getLoop*(s: WsPushSocket): Loop {.inline.} = s.loop
+proc run*(s: WsPushSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsPushSocket) {.inline.} = s.loop.stop()
 
 proc send*(s: WsPushSocket; data: string): bool {.discardable.} =
   if s.zcs.len == 0: return false
@@ -485,6 +553,8 @@ proc close*(s: WsPushSocket) =
     s.wss.close()
     s.wss = nil
   if s.onClose != nil: s.onClose()
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc pendingBytes*(s: WsPushSocket): int =
   var total = 0
@@ -574,6 +644,7 @@ proc connect*(s: WsPushSocket; address: string; port: int; path: string = "/";
 type
   WsPullSocket* = ref object
     loop: Loop
+    ownsLoop: bool
     wss: WsServer
     ws: seq[WsConnection]
     zcs: seq[ZmtpConnection]
@@ -581,7 +652,14 @@ type
     onClose*: proc() {.closure.}
 
 proc newWsPullSocket*(loop: Loop): WsPullSocket =
-  WsPullSocket(loop: loop, ws: @[], zcs: @[])
+  WsPullSocket(loop: loop, ws: @[], zcs: @[], ownsLoop: false)
+
+proc newWsPullSocket*(): WsPullSocket =
+  WsPullSocket(loop: newLoop(), ws: @[], zcs: @[], ownsLoop: true)
+
+proc getLoop*(s: WsPullSocket): Loop {.inline.} = s.loop
+proc run*(s: WsPullSocket) {.inline.} = s.loop.run()
+proc stop*(s: WsPullSocket) {.inline.} = s.loop.stop()
 
 proc send*(s: WsPullSocket; data: string): bool {.discardable.} =
   if s.zcs.len == 0: return false
@@ -599,6 +677,8 @@ proc close*(s: WsPullSocket) =
     s.wss.close()
     s.wss = nil
   if s.onClose != nil: s.onClose()
+  if s.ownsLoop and s.loop != nil:
+    s.loop.close()
 
 proc pendingBytes*(s: WsPullSocket): int =
   var total = 0

@@ -17,6 +17,7 @@ export loop, types, tcp, zmtp, auth, curve, tls
 type
   PairSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     server:     TcpServer
     conn*:       ZmtpConnection
     onMessage*: proc(data: openArray[byte]) {.closure.}
@@ -114,7 +115,16 @@ proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
       curve.setCurveExpectedVouch(zc, pair.expectedVouchPub)
 
 proc newPairSocket*(loop: Loop): PairSocket =
-  PairSocket(loop: loop)
+  PairSocket(loop: loop, ownsLoop: false)
+
+proc newPairSocket*(): PairSocket =
+  ## Creates a PAIR socket with its own event loop (no manual newLoop).
+  ## Use getLoop/run/stop; close() frees the owned loop.
+  PairSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: PairSocket): Loop {.inline.} = s.loop
+proc run*(s: PairSocket) {.inline.} = s.loop.run()
+proc stop*(s: PairSocket) {.inline.} = s.loop.stop()
 
 proc send*(pair: PairSocket; data: string): bool {.discardable.} =
   ## Returns false when the message was not delivered (no connection,
@@ -132,6 +142,8 @@ proc close*(pair: PairSocket) =
   if pair.server != nil:
     pair.server.close()
     pair.server = nil
+  if pair.ownsLoop and pair.loop != nil:
+    pair.loop.close()
 
 proc `bind`*(pair: PairSocket; address: string; port: int = 0;
              transport: Transport = TransportTcp) =

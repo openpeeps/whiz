@@ -22,6 +22,7 @@ else:
 
 import std/[tables]
 import powpow/[loop, types, net/tcp]
+import buffalo
 
 export tcp, loop, types
 
@@ -85,7 +86,12 @@ type
     mechData*:     RootRef  # mechanism-specific state
     # Non-nil when ZMTP frames are tunnelled through another transport (e.g. WebSocket).
     # Called with raw ZMTP frame bytes (header + body) to send through the tunnel.
+    # The view borrows a per-connection scratch buffer: copy it if you must
+    # retain bytes past the call (the default WS bridge copies synchronously).
     sendOverride*: proc(zc: ZmtpConnection; data: openArray[byte]): int {.closure.}
+    # Reusable scratch for the sendOverride framing path (buffalo pool:
+    # grows once, then stays flat — no per-frame seq allocation).
+    sendScratch: PooledBuffer[byte]
 
 # ── Greeting ─────────────────────────────────────────────────────────────────
 
@@ -117,22 +123,28 @@ proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
   ## active the body is copied, encrypted in-place, and the ciphertext is sent.
   if zc.conn == nil: return -1
   if zc.sendOverride != nil:
-    var frame: seq[byte]
+    # Scratch-reused framing: header + body are blitted into the
+    # per-connection pool (no per-frame seq alloc). The view is only valid
+    # for the call — sendOverride must copy synchronously (the WS bridge
+    # does: powpow queues bytes before returning).
+    # NOTE: setLen (not ensureLen) — the view length must be exact, since
+    # toOpenArray spans b.len and a stale longer len would leak bytes
+    # from previous (e.g. handshake) frames into this one.
+    let hdrLen = if body.len <= 255: 2 else: 10
+    let total = hdrLen + body.len
+    zc.sendScratch.setLen(total)
+    let base = cast[ptr UncheckedArray[byte]](addr zc.sendScratch.data[0])
     if body.len <= 255:
-      frame = newSeq[byte](2 + body.len)
-      frame[0] = flags
-      frame[1] = byte(body.len)
-      if body.len > 0:
-        copyMem(addr frame[2], unsafeAddr body[0], body.len)
+      base[0] = flags
+      base[1] = byte(body.len)
     else:
-      frame = newSeq[byte](10 + body.len)
-      frame[0] = flags or ZmtpLong
+      base[0] = flags or ZmtpLong
       let blen = uint64(body.len)
       for i in 0 ..< 8:
-        frame[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
-      if body.len > 0:
-        copyMem(addr frame[10], unsafeAddr body[0], body.len)
-    return zc.sendOverride(zc, frame)
+        base[1 + i] = byte((blen shr ((7 - i) * 8)) and 0xFF)
+    if body.len > 0:
+      copyMem(addr base[hdrLen], unsafeAddr body[0], body.len)
+    return zc.sendOverride(zc, zc.sendScratch.toOpenArray())
   if zc.mechEncrypt != nil:
     var payload = @body
     if not zc.mechEncrypt(zc, payload): return -1
@@ -214,6 +226,13 @@ proc sendMessage*(zc: ZmtpConnection; data: openArray[byte]): bool {.discardable
   ## Returns true when the frame was accepted by the transport. False means
   ## the underlying connection is dead or errored — the message was not sent.
   zc.sendFrame(0, data) > 0
+
+proc toStr*(data: openArray[byte]): string =
+  ## Copies a received frame payload into a string. Handy for examples
+  ## and tests; zero-copy handlers receive `openArray[byte]`.
+  result = newString(data.len)
+  if data.len > 0:
+    copyMem(addr result[0], unsafeAddr data[0], data.len)
 
 proc sendMultipart*(zc: ZmtpConnection; frames: openArray[seq[byte]]): bool {.discardable.} =
   ## Sends a multipart message. Every frame but the last carries ZmtpMore.
@@ -455,6 +474,17 @@ proc pendingBytes*(zc: ZmtpConnection): int =
   if zc == nil or zc.conn == nil: return 0
   zc.conn.pendingBytes()
 
+proc sendScratchCap*(zc: ZmtpConnection): int =
+  ## Capacity of the per-connection WS-framing scratch pool (bytes).
+  ## Grows once to the largest frame tunneled, then stays flat.
+  if zc == nil: return 0
+  zc.sendScratch.cap()
+
+proc sendScratchLen*(zc: ZmtpConnection): int =
+  ## Used length of the per-connection WS-framing scratch pool.
+  if zc == nil: return 0
+  zc.sendScratch.len
+
 proc flushWriteBuffer*(zc: ZmtpConnection): bool =
   ## Kicks the powpow write pump; returns true when fully drained.
   if zc == nil or zc.conn == nil: return true
@@ -468,6 +498,7 @@ proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "
     mechanism: mechanism,
     asServer: asServer,
     recvOff: 0,
+    sendScratch: initPool(byte, 4096),
   )
   if not skipGreeting:
     discard result.conn.send(buildGreeting(asServer, mechanism))

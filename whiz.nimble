@@ -9,9 +9,13 @@ srcDir        = "src"
 
 # Dependencies
 
-requires "nim >= 2.2.10"
+requires "nim >= 2.4.0"
 requires "powpow >= 0.2.7"
 requires "nimcypher >= 0.4.0"
+requires "buffalo >= 0.1.0"
 
 task bench, "Run all benchmarks":
   exec "nim c -d:release -r tests/bench_zmtp.nim"
+
+task benchMem, "Run memory benchmarks":
+  exec "nim c -d:release -r tests/bench_mem.nim"

@@ -18,6 +18,7 @@ export loop, types, tcp, zmtp, auth, curve, tls
 type
   PushSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     server:     TcpServer
     conns:      seq[ZmtpConnection]
     rrIndex:    int
@@ -33,6 +34,7 @@ type
 
   PullSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     server:     TcpServer
     conns:      seq[ZmtpConnection]
     onMessage*: proc(data: openArray[byte]) {.closure.}
@@ -101,7 +103,15 @@ proc pendingBytes*(s: PushSocket | PullSocket): int =
 # ── PushSocket ────────────────────────────────────────────────────────────────
 
 proc newPushSocket*(loop: Loop): PushSocket =
-  PushSocket(loop: loop, conns: @[], rrIndex: 0)
+  PushSocket(loop: loop, conns: @[], rrIndex: 0, ownsLoop: false)
+
+proc newPushSocket*(): PushSocket =
+  ## Creates a PUSH socket with its own event loop.
+  PushSocket(loop: newLoop(), conns: @[], rrIndex: 0, ownsLoop: true)
+
+proc getLoop*(s: PushSocket): Loop {.inline.} = s.loop
+proc run*(s: PushSocket) {.inline.} = s.loop.run()
+proc stop*(s: PushSocket) {.inline.} = s.loop.stop()
 
 proc send*(push: PushSocket; data: string): bool {.discardable.} =
   ## Round-robins to the next connected PULL. Returns false when nothing was
@@ -123,6 +133,8 @@ proc close*(push: PushSocket) =
     push.server.close()
     push.server = nil
   if push.onClose != nil: push.onClose()
+  if push.ownsLoop and push.loop != nil:
+    push.loop.close()
 
 proc `bind`*(push: PushSocket; address: string; port: int = 0;
              transport: Transport = TransportTcp) =
@@ -231,7 +243,15 @@ proc connect*(push: PushSocket; address: string; port: int = 0;
 # ── PullSocket ────────────────────────────────────────────────────────────────
 
 proc newPullSocket*(loop: Loop): PullSocket =
-  PullSocket(loop: loop, conns: @[])
+  PullSocket(loop: loop, conns: @[], ownsLoop: false)
+
+proc newPullSocket*(): PullSocket =
+  ## Creates a PULL socket with its own event loop.
+  PullSocket(loop: newLoop(), conns: @[], ownsLoop: true)
+
+proc getLoop*(s: PullSocket): Loop {.inline.} = s.loop
+proc run*(s: PullSocket) {.inline.} = s.loop.run()
+proc stop*(s: PullSocket) {.inline.} = s.loop.stop()
 
 proc send*(pull: PullSocket; data: string): bool {.discardable.} =
   ## Sends to the most recently connected PUSH peer. Returns false when
@@ -250,6 +270,8 @@ proc close*(pull: PullSocket) =
     pull.server.close()
     pull.server = nil
   if pull.onClose != nil: pull.onClose()
+  if pull.ownsLoop and pull.loop != nil:
+    pull.loop.close()
 
 proc `bind`*(pull: PullSocket; address: string; port: int = 0;
              transport: Transport = TransportTcp) =

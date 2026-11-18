@@ -27,6 +27,7 @@ type
 
   ClientSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     server:     TcpServer
     conn:       ZmtpConnection
     onReply*:   proc(data: openArray[byte]) {.closure.}
@@ -45,6 +46,7 @@ type
 
   ServerSocket* = ref object
     loop:       Loop
+    ownsLoop: bool
     server:     TcpServer
     clients:    seq[ServerClient]
     nextId:     uint32
@@ -148,7 +150,15 @@ proc applyClientServerAuth(zc: ZmtpConnection; authMech: string;
 # ── ClientSocket ────────────────────────────────────────────────────────────
 
 proc newClientSocket*(loop: Loop): ClientSocket =
-  ClientSocket(loop: loop)
+  ClientSocket(loop: loop, ownsLoop: false)
+
+proc newClientSocket*(): ClientSocket =
+  ## Creates a CLIENT socket with its own event loop.
+  ClientSocket(loop: newLoop(), ownsLoop: true)
+
+proc getLoop*(s: ClientSocket): Loop {.inline.} = s.loop
+proc run*(s: ClientSocket) {.inline.} = s.loop.run()
+proc stop*(s: ClientSocket) {.inline.} = s.loop.stop()
 
 proc send*(cli: ClientSocket; data: string): bool {.discardable.} =
   ## Sends one single-frame message to the SERVER. Returns false when the
@@ -177,6 +187,8 @@ proc close*(cli: ClientSocket) =
     cli.server.close()
     cli.server = nil
   if cli.onClose != nil: cli.onClose()
+  if cli.ownsLoop and cli.loop != nil:
+    cli.loop.close()
 
 proc wireClientHandlers(cli: ClientSocket; zc: ZmtpConnection) =
   zc.onReady = proc(zc: ZmtpConnection) =
@@ -264,7 +276,15 @@ proc connect*(cli: ClientSocket; address: string; port: int = 0;
 # ── ServerSocket ────────────────────────────────────────────────────────────
 
 proc newServerSocket*(loop: Loop): ServerSocket =
-  ServerSocket(loop: loop, clients: @[], nextId: 1)
+  ServerSocket(loop: loop, clients: @[], nextId: 1, ownsLoop: false)
+
+proc newServerSocket*(): ServerSocket =
+  ## Creates a SERVER socket with its own event loop.
+  ServerSocket(loop: newLoop(), clients: @[], nextId: 1, ownsLoop: true)
+
+proc getLoop*(s: ServerSocket): Loop {.inline.} = s.loop
+proc run*(s: ServerSocket) {.inline.} = s.loop.run()
+proc stop*(s: ServerSocket) {.inline.} = s.loop.stop()
 
 proc peerCount*(srv: ServerSocket): int =
   srv.clients.len
@@ -305,6 +325,8 @@ proc close*(srv: ServerSocket) =
     srv.server.close()
     srv.server = nil
   if srv.onClose != nil: srv.onClose()
+  if srv.ownsLoop and srv.loop != nil:
+    srv.loop.close()
 
 proc dropClient(srv: ServerSocket; client: ServerClient) =
   srv.clients.keepItIf(it != client)
