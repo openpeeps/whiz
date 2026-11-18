@@ -106,6 +106,29 @@ suite "feed":
     zc.feed(f)
     check topics == @["news"]
 
+  test "test_feed_split_then_burst_no_full_copy":
+    # Staged head completed by a chunk that also carries whole frames plus
+    # a trailing partial: only the split frame may touch recvBuf, the rest
+    # parses straight from the chunk.
+    var got: seq[string] = @[]
+    let zc = mkConn()
+    zc.onMessage = proc(z: ZmtpConnection; data: openArray[byte]) =
+      got.add(toStr(data))
+    let a = frameOf("alpha")
+    let b = frameOf("beta")
+    let c = frameOf("gamma")
+    zc.feed(a.toOpenArray(0, 2)) # flags + size + 1 body byte staged
+    var burst = newSeq[byte](a.len - 3 + b.len + c.len)
+    for i in 3 ..< a.len: burst[i - 3] = a[i]
+    for i in 0 ..< b.len: burst[a.len - 3 + i] = b[i]
+    for i in 0 ..< c.len: burst[a.len - 3 + b.len + i] = c[i]
+    # deliver tail of a + whole b, keep c split across two feeds
+    let cut = (a.len - 3) + b.len + 3
+    zc.feed(burst.toOpenArray(0, cut))
+    check got == @["alpha", "beta"]
+    zc.feed(burst.toOpenArray(cut + 1, burst.high))
+    check got == @["alpha", "beta", "gamma"]
+
   test "test_feed_multipart":
     var got: seq[seq[byte]] = @[]
     let zc = mkConn()

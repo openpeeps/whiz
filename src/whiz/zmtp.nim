@@ -402,25 +402,91 @@ proc readFrame(zc: ZmtpConnection; buf: ptr byte; rlen: int): tuple[ok: bool; fl
 
 proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
   if zc.state == ZmtpClosed or data.len == 0: return
-  if zc.recvLen == 0 and zc.state == ZmtpEstablished:
-    # Zero-copy fast path: nothing staged, so parse directly from the
-    # read chunk instead of copying it into recvBuf first. Only a
-    # trailing partial frame is staged. Delivered views borrow `data`
-    # and are valid only for the callback — same contract as before
-    # (they used to borrow the reused recvBuf).
+  if zc.state == ZmtpEstablished:
+    # Zero-copy receive: parse directly from the read chunk. Nothing is
+    # staged except a trailing partial frame, and a split frame is
+    # completed by copying only its missing tail (at most one frame),
+    # never the whole chunk. Delivered views borrow `data` (fast path)
+    # or the reused `recvBuf` (split frame) and are valid only for the
+    # callback, same contract as before.
     var off = 0
-    while off < data.len and zc.state == ZmtpEstablished:
+    if zc.recvLen > 0:
+      if zc.recvOff > 0:
+        if zc.recvLen > 0:
+          copyMem(addr zc.recvBuf[0], addr zc.recvBuf[zc.recvOff], zc.recvLen)
+        zc.recvOff = 0
+      while zc.recvLen > 0 and off < data.len and zc.state == ZmtpEstablished:
+        if zc.recvLen < 1: break
+        let sflags = zc.recvBuf[0]
+        var total = -1
+        if (sflags and ZmtpLong) == 0:
+          if zc.recvLen >= 2:
+            total = 2 + zc.recvBuf[1].int
+          elif off < data.len:
+            total = 2 + data[off].int
+          else: break
+        else:
+          if zc.recvLen >= 10:
+            var sz = 0
+            for i in 0 ..< 8: sz = (sz shl 8) or zc.recvBuf[1 + i].int
+            total = 10 + sz
+          else:
+            if zc.recvLen + (data.len - off) < 10:
+              let rem = data.len - off
+              if zc.recvBuf.len < zc.recvLen + rem:
+                zc.recvBuf.setLen(zc.recvLen + rem)
+              copyMem(addr zc.recvBuf[zc.recvLen], unsafeAddr data[off], rem)
+              zc.recvLen += rem
+              return
+            let hneed = 10 - zc.recvLen
+            if zc.recvBuf.len < 10: zc.recvBuf.setLen(10)
+            copyMem(addr zc.recvBuf[zc.recvLen], unsafeAddr data[off], hneed)
+            zc.recvLen = 10
+            off += hneed
+            continue
+        if total < 0: break
+        let need = total - zc.recvLen
+        if need <= 0:
+          # Staging already holds a full frame; deliver it without new data.
+          let (ok2, flags2, body2, bodyLen2, consumed2) =
+            readFrame(zc, addr zc.recvBuf[0], zc.recvLen)
+          if not ok2: return
+          establishedFrame(zc, flags2, body2, bodyLen2, consumed2,
+                           zc.consume(consumed2))
+          if zc.state != ZmtpEstablished: return
+          continue
+        if off + need > data.len:
+          let rem = data.len - off
+          if zc.recvBuf.len < zc.recvLen + rem:
+            zc.recvBuf.setLen(zc.recvLen + rem)
+          copyMem(addr zc.recvBuf[zc.recvLen], unsafeAddr data[off], rem)
+          zc.recvLen += rem
+          return
+        if zc.recvBuf.len < total: zc.recvBuf.setLen(total)
+        copyMem(addr zc.recvBuf[zc.recvLen], unsafeAddr data[off], need)
+        zc.recvLen = total
+        off += need
+        let (ok3, flags3, body3, bodyLen3, consumed3) =
+          readFrame(zc, addr zc.recvBuf[0], zc.recvLen)
+        if not ok3: return
+        establishedFrame(zc, flags3, body3, bodyLen3, consumed3,
+                         zc.consume(consumed3))
+        if zc.state != ZmtpEstablished: return
+      if zc.recvLen > 0: return
+      if zc.state != ZmtpEstablished: return
+    var foff = off
+    while foff < data.len and zc.state == ZmtpEstablished:
       let (ok, flags, body, bodyLen, consumed) =
-        readFrame(zc, cast[ptr byte](unsafeAddr data[off]), data.len - off)
+        readFrame(zc, cast[ptr byte](unsafeAddr data[foff]), data.len - foff)
       if not ok: break
-      establishedFrame(zc, flags, body, bodyLen, consumed, off += consumed)
+      establishedFrame(zc, flags, body, bodyLen, consumed, foff += consumed)
     if zc.state != ZmtpEstablished:
       return # ERROR command closed us; drop the rest like `done` would
-    if off < data.len:
-      let rem = data.len - off
+    if foff < data.len:
+      let rem = data.len - foff
       if zc.recvBuf.len < rem:
         zc.recvBuf.setLen(rem)
-      copyMem(addr zc.recvBuf[0], unsafeAddr data[off], rem)
+      copyMem(addr zc.recvBuf[0], unsafeAddr data[foff], rem)
       zc.recvOff = 0
       zc.recvLen = rem
     elif zc.recvBuf.len > 8192:

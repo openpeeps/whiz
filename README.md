@@ -130,23 +130,23 @@ thread per bench. Loopback TCP.
 
 | impl | benchmark | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| whiz | pair_latency | 5000 | 1 | 144720 | 34549 | 23.9 | 27.3 | 28.9 | 33.1 | 44.1 | 28.8 | 276.0 |
-| whiz | pair_throughput | 10000 | 512 | 11563 | 864755 | 0.0 | 0.0 | 0.1 | 1.3 | 1.9 | 0.3 | 374.0 |
-| whiz | reqrep | 5000 | 128 | 147627 | 33869 | 26.0 | 27.7 | 29.7 | 34.2 | 45.4 | 29.4 | 290.7 |
-| whiz | pushpull_1worker | 10000 | 128 | 2187 | 4570567 | 0.0 | 0.0 | 0.0 | 0.0 | 1.6 | 0.1 | 202.3 |
-| zmq | pair_latency | 5000 | 1 | 510731 | 9789 | 89.7 | 97.4 | 107.0 | 119.0 | 147.7 | 102.1 | 1593.6 |
-| zmq | pair_throughput | 10000 | 512 | 6344 | 1576206 | 0.2 | 0.2 | 0.2 | 0.3 | 17.8 | 0.6 | 336.4 |
-| zmq | reqrep | 5000 | 128 | 551512 | 9065 | 92.5 | 104.0 | 114.3 | 128.9 | 204.0 | 110.2 | 2069.8 |
-| zmq | pushpull_1worker | 10000 | 128 | 4296 | 2327689 | 0.2 | 0.2 | 0.2 | 0.3 | 9.8 | 0.4 | 179.9 |
+| whiz | pair_latency | 5000 | 1 | 137751 | 36297 | 23.4 | 26.5 | 27.2 | 30.0 | 44.7 | 27.5 | 295.8 |
+| whiz | pair_throughput | 10000 | 512 | 10225 | 977915 | 0.0 | 0.0 | 0.1 | 1.2 | 1.8 | 0.3 | 413.7 |
+| whiz | reqrep | 5000 | 128 | 144299 | 34650 | 25.2 | 27.5 | 28.1 | 31.6 | 48.7 | 28.8 | 333.8 |
+| whiz | pushpull_1worker | 10000 | 128 | 1960 | 5101140 | 0.0 | 0.0 | 0.0 | 0.0 | 1.5 | 0.1 | 201.6 |
+| zmq | pair_latency | 5000 | 1 | 499648 | 10007 | 90.5 | 95.3 | 106.1 | 112.1 | 134.2 | 99.8 | 1311.6 |
+| zmq | pair_throughput | 10000 | 512 | 6732 | 1485397 | 0.2 | 0.2 | 0.2 | 0.3 | 25.2 | 0.6 | 346.3 |
+| zmq | reqrep | 5000 | 128 | 521682 | 9584 | 93.4 | 99.2 | 109.4 | 118.3 | 140.9 | 104.2 | 1368.1 |
+| zmq | pushpull_1worker | 10000 | 128 | 3985 | 2509207 | 0.2 | 0.2 | 0.2 | 0.3 | 6.8 | 0.4 | 168.9 |
 
 **Takeaways:**
-- **Round-trips favor whiz ~3.5×** (pair_latency 35k vs 9.8k/s; reqrep 34k vs 9.1k/s) — single event loop, no context-switch or helper-thread hops.
-- **Floods are now split**: 128B PUSH/PULL favors whiz ~2× (4.57M vs 2.33M/s); 512B pair floods still favor ØMQ ~1.8× (1.58M vs 865k/s, down from 2.6× before batching + zero-copy receive).
+- **Round-trips favor whiz ~3.6×** (pair_latency 36k vs 10k/s; reqrep 35k vs 9.6k/s): single event loop, no context-switch or helper-thread hops.
+- **Floods are now split**: 128B PUSH/PULL favors whiz ~2× (5.10M vs 2.51M/s); 512B pair floods still favor ØMQ ~1.5× (1.49M vs 978k/s, down from 2.6× before batching, zero-copy receive, and uninitialized buffer growth).
 - Different APIs (event-loop vs blocking+threads), so treat this as a directional comparison, not a certified benchmark.
 
 ### Performance notes
 
-Three profile-driven optimizations (xctrace + `sample` on loopback floods),
+Six profile-driven optimizations (xctrace + `sample` on loopback floods),
 all verified with `nimble benchVsZmq` and `nimble benchMem`:
 
 - **Write batching** (`setBatching` on any socket, off by default). One
@@ -159,8 +159,22 @@ all verified with `nimble benchVsZmq` and `nimble benchMem`:
   - pair_latency: unchanged behavior by default (batching off)
 - **Zero-copy receive** (`feed` fast path). Fully-buffered frames used to
   be copied into `recvBuf` before parsing; they are now parsed straight
-  from the read chunk, staging only a trailing partial frame. Part of the
-  gains above; covered by `tests/test_feed.nim` (split/long/multi-frame).
+  from the read chunk, staging only a trailing partial frame. A split
+  frame is completed by copying only its missing tail (at most one frame),
+  never the whole chunk. Covered by `tests/test_feed.nim`
+  (split/long/multi-frame, split-then-burst).
+- **Read sizing** (`-d:powpowReadBufSize=N`, default 4096). One recv fills
+  up to the buffer size per Read event, so 4KB reads cost one syscall per
+  ~7 x 512B frames. 64KB reads take ~127 frames per recv with no added
+  latency and lift sustained floods ~40% (1.98M to 2.85M/s); the
+  single-burst vs-zmq pair flood gains ~15% (831k to 945k/s, 1.12M/s with
+  both this and the item below).
+- **Uninitialized buffer growth** (powpow write paths). Appending to
+  `writeBuf` used `setLen` (zero-fill) followed by `copyMem`, paying the
+  payload twice in memory traffic per message. Hot append paths now use
+  `setLenUninit` since every new byte is overwritten immediately; sustained
+  512B floods rise ~85% (3.2M to 6.0M/s). Retention behavior is unchanged
+  (`nimble benchMem` round-2 delta still ~80 bytes).
 - **Single-send tiny frames.** Payloads ≤ 64B go out as one contiguous
   stack buffer + `send` instead of a 2-part `writev` (skips iovec setup).
   - pair_latency avg: 27.9 → **26.9μs** (~+4% round-trip rate)
@@ -196,46 +210,46 @@ largest frame then stay flat, and a repeated 20k-message flood retains
 
 | benchmark | subscriber | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bench_pair_latency_tcp | - | 5000 | 1 | 137204 | 36441 | 24.1 | 26.9 | 27.2 | 27.5 | 52.7 | 27.4 | 4.8 |
-| bench_pair_latency_unix | - | 5000 | 1 | 31419 | 159136 | 5.8 | 6.1 | 6.2 | 6.2 | 8.6 | 6.2 | 1.0 |
-| bench_pair_throughput_tcp | - | 10000 | 512 | 16079 | 621913 | 0.0 | 0.0 | 0.1 | 1.3 | 3.1 | 0.3 | 4.2 |
-| bench_pair_throughput_unix | - | 10000 | 512 | 10471 | 954947 | 0.0 | 0.0 | 0.1 | 1.4 | 7.0 | 0.6 | 1.7 |
-| bench_pubsub_1sub_tcp | - | 10000 | 512 | 12556 | 796406 | 0.0 | 0.0 | 0.1 | 1.4 | 3.4 | 0.4 | 3.4 |
-| bench_pubsub_1sub_unix | - | 10000 | 512 | 10044 | 995561 | 0.0 | 0.0 | 0.1 | 1.3 | 6.5 | 0.5 | 1.6 |
-| bench_pubsub_2sub_tcp | sub0 | 5000 | 256 | 20016 | 249790 | 0.0 | 0.0 | 0.0 | 0.1 | 3.8 | 0.4 | 11.7 |
-| bench_pubsub_2sub_tcp | sub1 | 5000 | 256 | 20016 | 249790 | 0.0 | 0.0 | 0.0 | 0.1 | 3.7 | 0.3 | 9.9 |
-| bench_pubsub_2sub_tcp | total | 10000 | 256 | 20016 | 499581 | 0.0 | 0.0 | 0.0 | 0.1 | 3.8 | 0.3 | 10.8 |
-| bench_pubsub_2sub_unix | sub0 | 5000 | 256 | 4391 | 1138471 | 0.0 | 0.0 | 0.1 | 0.1 | 14.2 | 0.5 | 2.5 |
-| bench_pubsub_2sub_unix | sub1 | 5000 | 256 | 4391 | 1138471 | 0.0 | 0.0 | 0.0 | 0.1 | 14.3 | 0.5 | 2.5 |
-| bench_pubsub_2sub_unix | total | 10000 | 256 | 4391 | 2276942 | 0.0 | 0.0 | 0.1 | 0.1 | 14.2 | 0.5 | 2.5 |
-| bench_reqrep_tcp | - | 5000 | 128 | 146617 | 34102 | 26.2 | 27.9 | 28.9 | 30.9 | 47.8 | 29.2 | 4.1 |
-| bench_reqrep_unix | - | 5000 | 128 | 33862 | 147656 | 6.3 | 6.5 | 6.6 | 6.7 | 9.3 | 6.7 | 1.3 |
-| bench_sizes_pair_tcp | - | 2000 | 64 | 9345 | 214016 | 0.0 | 0.0 | 0.0 | 0.0 | 3.5 | 4.7 | 72.2 |
-| bench_sizes_pair_tcp | - | 2000 | 1024 | 11770 | 169915 | 0.0 | 0.1 | 1.7 | 1.9 | 3.2 | 5.8 | 84.7 |
-| bench_sizes_pair_tcp | - | 2000 | 65536 | 114554 | 17458 | 20.2 | 21.9 | 24.0 | 27.6 | 497.9 | 57.3 | 564.0 |
-| bench_sizes_pair_unix | - | 2000 | 64 | 1673 | 1194801 | 0.0 | 0.1 | 0.1 | 0.1 | 7.0 | 0.8 | 11.2 |
-| bench_sizes_pair_unix | - | 2000 | 1024 | 3158 | 633231 | 0.0 | 0.1 | 1.3 | 6.6 | 9.8 | 1.6 | 7.7 |
-| bench_sizes_pair_unix | - | 2000 | 65536 | 186151 | 10743 | 61.0 | 63.3 | 64.2 | 71.5 | 140.2 | 93.1 | 520.0 |
-| bench_pushpull_throughput_tcp | - | 10000 | 512 | 10939 | 914088 | 0.0 | 0.0 | 0.1 | 1.4 | 3.4 | 0.3 | 3.4 |
-| bench_pushpull_throughput_unix | - | 10000 | 512 | 8595 | 1163403 | 0.0 | 0.0 | 0.1 | 1.4 | 6.7 | 0.6 | 1.7 |
-| bench_pushpull_1worker_tcp | - | 10000 | 128 | 4930 | 2028354 | 0.0 | 0.0 | 0.0 | 0.0 | 1.6 | 0.1 | 2.3 |
-| bench_pushpull_1worker_unix | - | 10000 | 128 | 3071 | 3255314 | 0.0 | 0.0 | 0.0 | 0.0 | 0.1 | 0.2 | 0.8 |
-| bench_pushpull_3workers_tcp | worker0 | 1667 | 128 | 8667 | 192326 | 0.0 | 0.0 | 0.0 | 0.0 | 4.2 | 0.3 | 8.1 |
-| bench_pushpull_3workers_tcp | worker1 | 1667 | 128 | 8667 | 192326 | 0.0 | 0.0 | 0.0 | 0.0 | 3.9 | 0.3 | 7.8 |
-| bench_pushpull_3workers_tcp | worker2 | 1666 | 128 | 8667 | 192211 | 0.0 | 0.0 | 0.0 | 0.0 | 4.2 | 0.3 | 7.4 |
-| bench_pushpull_3workers_tcp | total | 5000 | 128 | 8667 | 576865 | 0.0 | 0.0 | 0.0 | 0.0 | 3.9 | 0.3 | 7.8 |
-| bench_pushpull_3workers_unix | worker0 | 1667 | 128 | 1711 | 973920 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.5 | 3.1 |
-| bench_pushpull_3workers_unix | worker1 | 1667 | 128 | 1711 | 973920 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.4 | 3.1 |
-| bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 1711 | 973336 | 0.0 | 0.0 | 0.0 | 0.0 | 23.0 | 0.4 | 3.0 |
-| bench_pushpull_3workers_unix | total | 5000 | 128 | 1711 | 2921176 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.4 | 3.1 |
+| bench_pair_latency_tcp | - | 5000 | 1 | 137271 | 36424 | 23.7 | 26.0 | 27.2 | 30.5 | 47.8 | 27.4 | 4.5 |
+| bench_pair_latency_unix | - | 5000 | 1 | 30816 | 162250 | 5.7 | 6.0 | 6.0 | 6.1 | 8.6 | 6.1 | 0.8 |
+| bench_pair_throughput_tcp | - | 10000 | 512 | 15012 | 666090 | 0.0 | 0.0 | 0.0 | 1.2 | 3.3 | 0.3 | 4.3 |
+| bench_pair_throughput_unix | - | 10000 | 512 | 8456 | 1182456 | 0.0 | 0.0 | 0.1 | 1.3 | 6.5 | 0.5 | 1.6 |
+| bench_pubsub_1sub_tcp | - | 10000 | 512 | 10453 | 956608 | 0.0 | 0.0 | 0.1 | 1.3 | 3.1 | 0.3 | 3.4 |
+| bench_pubsub_1sub_unix | - | 10000 | 512 | 8589 | 1164220 | 0.0 | 0.0 | 0.1 | 1.2 | 6.4 | 0.5 | 1.6 |
+| bench_pubsub_2sub_tcp | sub0 | 5000 | 256 | 19991 | 250101 | 0.0 | 0.0 | 0.0 | 0.1 | 4.5 | 0.5 | 13.1 |
+| bench_pubsub_2sub_tcp | sub1 | 4114 | 256 | 19991 | 205783 | 0.0 | 0.0 | 0.0 | 0.1 | 4.8 | 0.4 | 9.6 |
+| bench_pubsub_2sub_tcp | total | 9114 | 256 | 19991 | 455885 | 0.0 | 0.0 | 0.0 | 0.1 | 4.7 | 0.4 | 11.6 |
+| bench_pubsub_2sub_unix | sub0 | 5000 | 256 | 4192 | 1192696 | 0.0 | 0.0 | 0.1 | 0.1 | 14.2 | 0.6 | 2.7 |
+| bench_pubsub_2sub_unix | sub1 | 5000 | 256 | 4192 | 1192696 | 0.0 | 0.0 | 0.1 | 0.1 | 14.4 | 0.6 | 2.7 |
+| bench_pubsub_2sub_unix | total | 10000 | 256 | 4192 | 2385393 | 0.0 | 0.0 | 0.1 | 0.1 | 14.4 | 0.6 | 2.7 |
+| bench_reqrep_tcp | - | 5000 | 128 | 145158 | 34445 | 25.1 | 27.6 | 27.9 | 32.2 | 49.5 | 29.0 | 4.5 |
+| bench_reqrep_unix | - | 5000 | 128 | 33096 | 151075 | 6.2 | 6.4 | 6.5 | 6.6 | 9.3 | 6.6 | 0.7 |
+| bench_sizes_pair_tcp | - | 2000 | 64 | 9960 | 200800 | 0.0 | 0.0 | 0.0 | 0.0 | 3.4 | 5.0 | 77.5 |
+| bench_sizes_pair_tcp | - | 2000 | 1024 | 11020 | 181486 | 0.0 | 0.1 | 1.7 | 1.9 | 4.0 | 5.5 | 78.4 |
+| bench_sizes_pair_tcp | - | 2000 | 65536 | 82963 | 24106 | 19.3 | 20.6 | 23.1 | 28.5 | 358.3 | 41.5 | 319.0 |
+| bench_sizes_pair_unix | - | 2000 | 64 | 1671 | 1196835 | 0.0 | 0.0 | 0.1 | 0.1 | 6.5 | 0.8 | 11.2 |
+| bench_sizes_pair_unix | - | 2000 | 1024 | 2689 | 743640 | 0.0 | 0.1 | 1.2 | 6.1 | 9.5 | 1.3 | 4.0 |
+| bench_sizes_pair_unix | - | 2000 | 65536 | 152637 | 13102 | 59.8 | 62.5 | 62.7 | 64.3 | 76.6 | 76.3 | 428.1 |
+| bench_pushpull_throughput_tcp | - | 10000 | 512 | 9657 | 1035513 | 0.0 | 0.0 | 0.0 | 1.2 | 3.4 | 0.3 | 3.9 |
+| bench_pushpull_throughput_unix | - | 10000 | 512 | 7129 | 1402544 | 0.0 | 0.0 | 0.1 | 1.3 | 6.8 | 0.5 | 1.6 |
+| bench_pushpull_1worker_tcp | - | 10000 | 128 | 4782 | 2090747 | 0.0 | 0.0 | 0.0 | 0.0 | 1.4 | 0.1 | 2.2 |
+| bench_pushpull_1worker_unix | - | 10000 | 128 | 2591 | 3858889 | 0.0 | 0.0 | 0.0 | 0.0 | 6.2 | 0.2 | 0.8 |
+| bench_pushpull_3workers_tcp | worker0 | 1667 | 128 | 8859 | 188153 | 0.0 | 0.0 | 0.0 | 0.0 | 4.1 | 0.4 | 9.1 |
+| bench_pushpull_3workers_tcp | worker1 | 1667 | 128 | 8859 | 188153 | 0.0 | 0.0 | 0.0 | 0.0 | 3.7 | 0.3 | 8.2 |
+| bench_pushpull_3workers_tcp | worker2 | 1666 | 128 | 8859 | 188040 | 0.0 | 0.0 | 0.0 | 0.0 | 3.6 | 0.3 | 7.5 |
+| bench_pushpull_3workers_tcp | total | 5000 | 128 | 8859 | 564347 | 0.0 | 0.0 | 0.0 | 0.0 | 4.8 | 0.3 | 8.3 |
+| bench_pushpull_3workers_unix | worker0 | 1667 | 128 | 1650 | 1010184 | 0.0 | 0.0 | 0.1 | 0.1 | 22.7 | 0.5 | 3.2 |
+| bench_pushpull_3workers_unix | worker1 | 1667 | 128 | 1650 | 1010184 | 0.0 | 0.0 | 0.1 | 0.1 | 22.9 | 0.5 | 3.2 |
+| bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 1650 | 1009578 | 0.0 | 0.0 | 0.1 | 0.1 | 22.8 | 0.5 | 3.2 |
+| bench_pushpull_3workers_unix | total | 5000 | 128 | 1650 | 3029946 | 0.0 | 0.0 | 0.1 | 0.1 | 22.8 | 0.5 | 3.2 |
 
 **Key observations:**
-- **Unix domain sockets win big on latency** — round-trip benchmarks are ~4.4× faster on Unix (pair_latency avg 6.2μs vs 27.4μs; reqrep 6.7μs vs 29.2μs) with tighter jitter.
-- **Bulk 64 KiB transfers favor TCP under backpressure but the gap closed** — with ACK-windowed flow control, 65536B pair delivery reaches ~17.5k msgs/s over TCP vs ~10.7k/s over Unix (1.6×; avg inter-arrival gap 57μs vs 93μs).
-- **Small-message floods saturate around 600k–1.2M msgs/s** per connection for 512B payloads; PUSH/PULL with 128B frames to a single worker exceeds 2M msgs/s on TCP and 3.2M msgs/s on Unix.
-- **Multi-worker PUSH/PULL divides fairly but adds per-worker overhead** — 3 workers aggregate ~577k msgs/s on TCP vs 2.9M msgs/s on Unix.
-- **Pub/sub fan-out is balanced on both transports** — `pubsub_2sub` delivers 5000/5000 per subscriber on TCP and Unix alike.
-- **Backpressure-safe by construction** — flood volumes beyond powpow's `maxWriteBufferSize` cap (default 32MB, tunable via `-d:maxWriteBufferSize=N` in MB) are handled by ACK windows + watchdog timers instead of silent connection death.
+- **Unix domain sockets win big on latency**: round-trip benchmarks are ~4.4× faster on Unix (pair_latency avg 6.1μs vs 27.4μs; reqrep 6.6μs vs 29.0μs) with tighter jitter.
+- **Bulk 64 KiB transfers favor TCP under backpressure**: with ACK-windowed flow control, 65536B pair delivery reaches ~24.1k msgs/s over TCP vs ~13.1k/s over Unix (1.8×; avg inter-arrival gap 41.5μs vs 76.3μs).
+- **Small-message floods saturate around 650k–1.4M msgs/s** per connection for 512B payloads; PUSH/PULL with 128B frames to a single worker exceeds 2M msgs/s on TCP and 3.8M msgs/s on Unix.
+- **Multi-worker PUSH/PULL divides fairly but adds per-worker overhead**: 3 workers aggregate ~564k msgs/s on TCP vs 3.0M msgs/s on Unix.
+- **Pub/sub fan-out is balanced on Unix, noisy on TCP**: `pubsub_2sub` delivers 5000/5000 per subscriber on Unix; TCP fan-out varies run to run (5000/4114 here).
+- **Backpressure-safe by construction**: flood volumes beyond powpow's `maxWriteBufferSize` cap (default 32MB, tunable via `-d:maxWriteBufferSize=N` in MB) are handled by ACK windows + watchdog timers instead of silent connection death.
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/openpeeps/whiz/issues)
