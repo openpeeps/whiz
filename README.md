@@ -192,45 +192,45 @@ largest frame then stay flat, and a repeated 20k-message flood retains
 
 | benchmark | subscriber | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| bench_pair_latency_tcp | - | 5000 | 1 | 413222 | 12100 | 73.7 | 76.1 | 80.9 | 100.0 | 145.3 | 82.5 | 15.0 |
-| bench_pair_latency_unix | - | 5000 | 1 | 372268 | 13431 | 67.8 | 68.4 | 73.6 | 89.5 | 125.7 | 74.3 | 12.7 |
-| bench_pair_throughput_tcp | - | 10000 | 512 | 27907 | 358332 | 0.2 | 0.2 | 0.2 | 2.0 | 5.0 | 0.7 | 6.1 |
-| bench_pair_throughput_unix | - | 10000 | 512 | 64441 | 155179 | 0.2 | 0.2 | 0.2 | 1.9 | 82.5 | 4.9 | 17.6 |
-| bench_pubsub_1sub_tcp | - | 10000 | 512 | 23566 | 424336 | 0.2 | 0.2 | 0.3 | 2.0 | 4.8 | 0.7 | 6.2 |
-| bench_pubsub_1sub_unix | - | 10000 | 512 | 22232 | 449790 | 0.2 | 0.2 | 0.2 | 1.8 | 10.1 | 0.9 | 2.5 |
-| bench_pubsub_2sub_tcp | sub0 | 5000 | 256 | 23489 | 212864 | 0.2 | 0.2 | 0.2 | 0.2 | 7.8 | 0.8 | 24.1 |
-| bench_pubsub_2sub_tcp | sub1 | 4143 | 256 | 23489 | 176379 | 0.2 | 0.2 | 0.2 | 0.2 | 7.8 | 0.8 | 20.5 |
-| bench_pubsub_2sub_tcp | total | 9143 | 256 | 23489 | 389244 | 0.2 | 0.2 | 0.2 | 0.2 | 7.8 | 0.8 | 22.5 |
-| bench_pubsub_2sub_unix | sub0 | 5000 | 256 | 14531 | 344082 | 0.2 | 0.2 | 0.3 | 0.3 | 35.0 | 1.3 | 5.7 |
-| bench_pubsub_2sub_unix | sub1 | 5000 | 256 | 14531 | 344082 | 0.2 | 0.2 | 0.3 | 0.3 | 35.0 | 1.3 | 5.7 |
-| bench_pubsub_2sub_unix | total | 10000 | 256 | 14531 | 688164 | 0.2 | 0.2 | 0.3 | 0.3 | 35.0 | 1.3 | 5.7 |
-| bench_reqrep_tcp | - | 5000 | 128 | 450034 | 11110 | 73.7 | 78.5 | 96.3 | 120.5 | 164.8 | 89.8 | 21.4 |
-| bench_reqrep_unix | - | 5000 | 128 | 367558 | 13603 | 68.0 | 68.6 | 71.5 | 86.8 | 116.7 | 73.4 | 10.5 |
-| bench_sizes_pair_tcp | - | 2000 | 64 | 7525 | 265775 | 0.1 | 0.2 | 0.2 | 0.2 | 4.0 | 3.8 | 56.6 |
-| bench_sizes_pair_tcp | - | 2000 | 1024 | 9360 | 213652 | 0.2 | 0.2 | 2.3 | 2.7 | 5.0 | 4.7 | 60.0 |
-| bench_sizes_pair_tcp | - | 2000 | 65536 | 282384 | 7082 | 24.5 | 28.1 | 33.2 | 44.8 | 351.2 | 141.2 | 1584.9 |
-| bench_sizes_pair_unix | - | 2000 | 64 | 4612 | 433560 | 0.1 | 0.2 | 0.2 | 0.3 | 70.6 | 2.3 | 23.0 |
-| bench_sizes_pair_unix | - | 2000 | 1024 | 23033 | 86830 | 0.2 | 0.2 | 1.8 | 66.0 | 91.0 | 11.5 | 42.2 |
-| bench_sizes_pair_unix | - | 2000 | 65536 | 1372650 | 1457 | 538.6 | 550.1 | 594.5 | 665.8 | 826.3 | 686.3 | 1691.0 |
-| bench_pushpull_throughput_tcp | - | 10000 | 512 | 19621 | 509656 | 0.2 | 0.2 | 0.2 | 1.9 | 5.0 | 0.6 | 5.7 |
-| bench_pushpull_throughput_unix | - | 10000 | 512 | 60745 | 164620 | 0.2 | 0.2 | 0.2 | 1.9 | 82.0 | 4.9 | 17.8 |
-| bench_pushpull_1worker_tcp | - | 10000 | 128 | 9022 | 1108394 | 0.1 | 0.2 | 0.2 | 0.2 | 2.2 | 0.3 | 3.2 |
-| bench_pushpull_1worker_unix | - | 10000 | 128 | 7878 | 1269208 | 0.1 | 0.2 | 0.2 | 0.2 | 8.8 | 0.4 | 1.3 |
-| bench_pushpull_3workers_tcp | worker0 | 1667 | 128 | 10084 | 165302 | 0.2 | 0.2 | 0.2 | 0.2 | 8.2 | 0.8 | 17.4 |
-| bench_pushpull_3workers_tcp | worker1 | 1667 | 128 | 10084 | 165302 | 0.2 | 0.2 | 0.2 | 0.2 | 4.2 | 0.8 | 20.7 |
-| bench_pushpull_3workers_tcp | worker2 | 1666 | 128 | 10084 | 165203 | 0.2 | 0.2 | 0.2 | 0.2 | 4.1 | 0.9 | 22.0 |
-| bench_pushpull_3workers_tcp | total | 5000 | 128 | 10084 | 495807 | 0.2 | 0.2 | 0.2 | 0.2 | 7.6 | 0.8 | 20.1 |
-| bench_pushpull_3workers_unix | worker0 | 1667 | 128 | 4079 | 408632 | 0.2 | 0.2 | 0.2 | 0.2 | 46.7 | 1.0 | 6.5 |
-| bench_pushpull_3workers_unix | worker1 | 1667 | 128 | 4079 | 408632 | 0.2 | 0.2 | 0.2 | 0.2 | 46.6 | 1.0 | 6.3 |
-| bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 4079 | 408386 | 0.2 | 0.2 | 0.2 | 0.2 | 46.8 | 1.0 | 6.1 |
-| bench_pushpull_3workers_unix | total | 5000 | 128 | 4079 | 1225650 | 0.2 | 0.2 | 0.2 | 0.2 | 46.8 | 1.0 | 6.3 |
+| bench_pair_latency_tcp | - | 5000 | 1 | 137204 | 36441 | 24.1 | 26.9 | 27.2 | 27.5 | 52.7 | 27.4 | 4.8 |
+| bench_pair_latency_unix | - | 5000 | 1 | 31419 | 159136 | 5.8 | 6.1 | 6.2 | 6.2 | 8.6 | 6.2 | 1.0 |
+| bench_pair_throughput_tcp | - | 10000 | 512 | 16079 | 621913 | 0.0 | 0.0 | 0.1 | 1.3 | 3.1 | 0.3 | 4.2 |
+| bench_pair_throughput_unix | - | 10000 | 512 | 10471 | 954947 | 0.0 | 0.0 | 0.1 | 1.4 | 7.0 | 0.6 | 1.7 |
+| bench_pubsub_1sub_tcp | - | 10000 | 512 | 12556 | 796406 | 0.0 | 0.0 | 0.1 | 1.4 | 3.4 | 0.4 | 3.4 |
+| bench_pubsub_1sub_unix | - | 10000 | 512 | 10044 | 995561 | 0.0 | 0.0 | 0.1 | 1.3 | 6.5 | 0.5 | 1.6 |
+| bench_pubsub_2sub_tcp | sub0 | 5000 | 256 | 20016 | 249790 | 0.0 | 0.0 | 0.0 | 0.1 | 3.8 | 0.4 | 11.7 |
+| bench_pubsub_2sub_tcp | sub1 | 5000 | 256 | 20016 | 249790 | 0.0 | 0.0 | 0.0 | 0.1 | 3.7 | 0.3 | 9.9 |
+| bench_pubsub_2sub_tcp | total | 10000 | 256 | 20016 | 499581 | 0.0 | 0.0 | 0.0 | 0.1 | 3.8 | 0.3 | 10.8 |
+| bench_pubsub_2sub_unix | sub0 | 5000 | 256 | 4391 | 1138471 | 0.0 | 0.0 | 0.1 | 0.1 | 14.2 | 0.5 | 2.5 |
+| bench_pubsub_2sub_unix | sub1 | 5000 | 256 | 4391 | 1138471 | 0.0 | 0.0 | 0.0 | 0.1 | 14.3 | 0.5 | 2.5 |
+| bench_pubsub_2sub_unix | total | 10000 | 256 | 4391 | 2276942 | 0.0 | 0.0 | 0.1 | 0.1 | 14.2 | 0.5 | 2.5 |
+| bench_reqrep_tcp | - | 5000 | 128 | 146617 | 34102 | 26.2 | 27.9 | 28.9 | 30.9 | 47.8 | 29.2 | 4.1 |
+| bench_reqrep_unix | - | 5000 | 128 | 33862 | 147656 | 6.3 | 6.5 | 6.6 | 6.7 | 9.3 | 6.7 | 1.3 |
+| bench_sizes_pair_tcp | - | 2000 | 64 | 9345 | 214016 | 0.0 | 0.0 | 0.0 | 0.0 | 3.5 | 4.7 | 72.2 |
+| bench_sizes_pair_tcp | - | 2000 | 1024 | 11770 | 169915 | 0.0 | 0.1 | 1.7 | 1.9 | 3.2 | 5.8 | 84.7 |
+| bench_sizes_pair_tcp | - | 2000 | 65536 | 114554 | 17458 | 20.2 | 21.9 | 24.0 | 27.6 | 497.9 | 57.3 | 564.0 |
+| bench_sizes_pair_unix | - | 2000 | 64 | 1673 | 1194801 | 0.0 | 0.1 | 0.1 | 0.1 | 7.0 | 0.8 | 11.2 |
+| bench_sizes_pair_unix | - | 2000 | 1024 | 3158 | 633231 | 0.0 | 0.1 | 1.3 | 6.6 | 9.8 | 1.6 | 7.7 |
+| bench_sizes_pair_unix | - | 2000 | 65536 | 186151 | 10743 | 61.0 | 63.3 | 64.2 | 71.5 | 140.2 | 93.1 | 520.0 |
+| bench_pushpull_throughput_tcp | - | 10000 | 512 | 10939 | 914088 | 0.0 | 0.0 | 0.1 | 1.4 | 3.4 | 0.3 | 3.4 |
+| bench_pushpull_throughput_unix | - | 10000 | 512 | 8595 | 1163403 | 0.0 | 0.0 | 0.1 | 1.4 | 6.7 | 0.6 | 1.7 |
+| bench_pushpull_1worker_tcp | - | 10000 | 128 | 4930 | 2028354 | 0.0 | 0.0 | 0.0 | 0.0 | 1.6 | 0.1 | 2.3 |
+| bench_pushpull_1worker_unix | - | 10000 | 128 | 3071 | 3255314 | 0.0 | 0.0 | 0.0 | 0.0 | 0.1 | 0.2 | 0.8 |
+| bench_pushpull_3workers_tcp | worker0 | 1667 | 128 | 8667 | 192326 | 0.0 | 0.0 | 0.0 | 0.0 | 4.2 | 0.3 | 8.1 |
+| bench_pushpull_3workers_tcp | worker1 | 1667 | 128 | 8667 | 192326 | 0.0 | 0.0 | 0.0 | 0.0 | 3.9 | 0.3 | 7.8 |
+| bench_pushpull_3workers_tcp | worker2 | 1666 | 128 | 8667 | 192211 | 0.0 | 0.0 | 0.0 | 0.0 | 4.2 | 0.3 | 7.4 |
+| bench_pushpull_3workers_tcp | total | 5000 | 128 | 8667 | 576865 | 0.0 | 0.0 | 0.0 | 0.0 | 3.9 | 0.3 | 7.8 |
+| bench_pushpull_3workers_unix | worker0 | 1667 | 128 | 1711 | 973920 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.5 | 3.1 |
+| bench_pushpull_3workers_unix | worker1 | 1667 | 128 | 1711 | 973920 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.4 | 3.1 |
+| bench_pushpull_3workers_unix | worker2 | 1666 | 128 | 1711 | 973336 | 0.0 | 0.0 | 0.0 | 0.0 | 23.0 | 0.4 | 3.0 |
+| bench_pushpull_3workers_unix | total | 5000 | 128 | 1711 | 2921176 | 0.0 | 0.0 | 0.0 | 0.1 | 23.1 | 0.4 | 3.1 |
 
 **Key observations:**
-- **Unix domain sockets win on latency** — round-trip benchmarks are ~12% faster on Unix (pair_latency avg 74μs vs 83μs; reqrep 73μs vs 90μs) with tighter jitter.
-- **Bulk 64 KiB transfers strongly favor TCP under backpressure** — with ACK-windowed flow control, 65536B pair delivery reaches ~7.1k msgs/s over TCP vs ~1.5k/s over Unix (4.9×): smaller Unix-socket buffers fragment large writes into many more wakeups (avg inter-arrival gap 686μs vs 141μs).
-- **Small-message floods saturate around 350–500k msgs/s** per connection for 512B payloads; PUSH/PULL with 128B frames to a single worker exceeds 1.1M msgs/s on both transports.
-- **Multi-worker PUSH/PULL divides fairly but adds per-worker overhead** — 3 workers aggregate ~496k msgs/s on TCP vs 1.2M msgs/s on Unix.
-- **Pub/sub fan-out stays imbalanced on TCP** — `pubsub_2sub` delivers 5000/4143 across subscribers before the first completes the run; Unix fans out evenly (5000/5000).
+- **Unix domain sockets win big on latency** — round-trip benchmarks are ~4.4× faster on Unix (pair_latency avg 6.2μs vs 27.4μs; reqrep 6.7μs vs 29.2μs) with tighter jitter.
+- **Bulk 64 KiB transfers favor TCP under backpressure but the gap closed** — with ACK-windowed flow control, 65536B pair delivery reaches ~17.5k msgs/s over TCP vs ~10.7k/s over Unix (1.6×; avg inter-arrival gap 57μs vs 93μs).
+- **Small-message floods saturate around 600k–1.2M msgs/s** per connection for 512B payloads; PUSH/PULL with 128B frames to a single worker exceeds 2M msgs/s on TCP and 3.2M msgs/s on Unix.
+- **Multi-worker PUSH/PULL divides fairly but adds per-worker overhead** — 3 workers aggregate ~577k msgs/s on TCP vs 2.9M msgs/s on Unix.
+- **Pub/sub fan-out is balanced on both transports** — `pubsub_2sub` delivers 5000/5000 per subscriber on TCP and Unix alike.
 - **Backpressure-safe by construction** — flood volumes beyond powpow's `maxWriteBufferSize` cap (default 32MB, tunable via `-d:maxWriteBufferSize=N` in MB) are handled by ACK windows + watchdog timers instead of silent connection death.
 
 ### ❤ Contributions & Support
