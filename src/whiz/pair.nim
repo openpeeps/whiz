@@ -18,6 +18,7 @@ type
   PairSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    batchWrites: bool
     server:     TcpServer
     conn*:       ZmtpConnection
     onMessage*: proc(data: openArray[byte]) {.closure.}
@@ -94,6 +95,13 @@ proc setTlsKtlsRequired*(pair: PairSocket; zerocopySendfile = false) =
   if pair.tls == nil: pair.tls = TlsConfig()
   pair.tls.configureTlsKtls(KtlsRequired, zerocopySendfile)
 
+proc setBatching*(pair: PairSocket; on: bool = true) =
+  ## Coalesces sends into bulk writes (see `setBatching` in powpow).
+  ## Enable for floods; leave off for lockstep latency paths.
+  pair.batchWrites = on
+  if pair.conn != nil:
+    pair.conn.conn.setBatching(on)
+
 proc pendingBytes*(pair: PairSocket): int =
   ## Bytes queued in powpow write buffers for this connection (0 = drained).
   if pair.conn != nil: pair.conn.pendingBytes()
@@ -159,6 +167,7 @@ proc `bind`*(pair: PairSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     ps.conn = zc
     applySocketAuth(zc, ps)
 
@@ -203,6 +212,7 @@ proc connect*(pair: PairSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     ps.conn = zc
     applySocketAuth(zc, ps)
 

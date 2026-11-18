@@ -40,7 +40,7 @@
 - [ ] GSSAPI / Kerberos mechanism
 - [x] WebSocket transport (RFC 6455 + permessage-deflate/ping options)
 - [ ] Formal ZMTP conformance tests
-- [ ] Performance benchmarks vs ØMQ
+- [x] Performance benchmarks vs ØMQ (see below)
 
 
 ## Examples
@@ -120,6 +120,54 @@ cli.setCurveVouch(vouchPub, vouchSec)
 ### Benchmarks
 > [!NOTE]
 > Benchmark results are not consistent and may show different results across runs and environments.
+
+### vs ØMQ (C libzmq 5.2.5 via pkg/zmq)
+
+Same scenarios, same payloads, same machine, back-to-back (`tests/bench_vs_zmq.nim`,
+`DYLD_LIBRARY_PATH=/opt/local/lib nim c -d:release -r tests/bench_vs_zmq.nim`).
+whiz peers share one event loop; ØMQ uses its blocking API with a helper
+thread per bench. Loopback TCP.
+
+| impl | benchmark | n | size | total(μs) | throughput/s | min(μs) | p50(μs) | p75(μs) | p90(μs) | p99(μs) | avg(μs) | σ(μs) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| whiz | pair_latency | 5000 | 1 | 144720 | 34549 | 23.9 | 27.3 | 28.9 | 33.1 | 44.1 | 28.8 | 276.0 |
+| whiz | pair_throughput | 10000 | 512 | 11563 | 864755 | 0.0 | 0.0 | 0.1 | 1.3 | 1.9 | 0.3 | 374.0 |
+| whiz | reqrep | 5000 | 128 | 147627 | 33869 | 26.0 | 27.7 | 29.7 | 34.2 | 45.4 | 29.4 | 290.7 |
+| whiz | pushpull_1worker | 10000 | 128 | 2187 | 4570567 | 0.0 | 0.0 | 0.0 | 0.0 | 1.6 | 0.1 | 202.3 |
+| zmq | pair_latency | 5000 | 1 | 510731 | 9789 | 89.7 | 97.4 | 107.0 | 119.0 | 147.7 | 102.1 | 1593.6 |
+| zmq | pair_throughput | 10000 | 512 | 6344 | 1576206 | 0.2 | 0.2 | 0.2 | 0.3 | 17.8 | 0.6 | 336.4 |
+| zmq | reqrep | 5000 | 128 | 551512 | 9065 | 92.5 | 104.0 | 114.3 | 128.9 | 204.0 | 110.2 | 2069.8 |
+| zmq | pushpull_1worker | 10000 | 128 | 4296 | 2327689 | 0.2 | 0.2 | 0.2 | 0.3 | 9.8 | 0.4 | 179.9 |
+
+**Takeaways:**
+- **Round-trips favor whiz ~3.5×** (pair_latency 35k vs 9.8k/s; reqrep 34k vs 9.1k/s) — single event loop, no context-switch or helper-thread hops.
+- **Floods are now split**: 128B PUSH/PULL favors whiz ~2× (4.57M vs 2.33M/s); 512B pair floods still favor ØMQ ~1.8× (1.58M vs 865k/s, down from 2.6× before batching + zero-copy receive).
+- Different APIs (event-loop vs blocking+threads), so treat this as a directional comparison, not a certified benchmark.
+
+### Performance notes
+
+Three profile-driven optimizations (xctrace + `sample` on loopback floods),
+all verified with `nimble benchVsZmq` and `nimble benchMem`:
+
+- **Write batching** (`setBatching` on any socket, off by default). One
+  `writev` per message dominated profiles (~60% of active time), so batched
+  sends coalesce into the write buffer and drain in bulk on the next loop
+  pass. Enable for floods; leave off for lockstep latency paths, which
+  already hit the wire immediately.
+  - pair_throughput 512B: 467k → **865k/s** (+85%)
+  - pushpull_1worker 128B: 1.74M → **4.57M/s** (+163%)
+  - pair_latency: unchanged behavior by default (batching off)
+- **Zero-copy receive** (`feed` fast path). Fully-buffered frames used to
+  be copied into `recvBuf` before parsing; they are now parsed straight
+  from the read chunk, staging only a trailing partial frame. Part of the
+  gains above; covered by `tests/test_feed.nim` (split/long/multi-frame).
+- **Single-send tiny frames.** Payloads ≤ 64B go out as one contiguous
+  stack buffer + `send` instead of a 2-part `writev` (skips iovec setup).
+  - pair_latency avg: 27.9 → **26.9μs** (~+4% round-trip rate)
+
+Memory stays flat by construction: per-connection pools grow once to the
+largest frame then stay flat, and a repeated 20k-message flood retains
+~0 B/message on round two (`tests/bench_mem.nim`).
 
 **Column legend:**
 - `benchmark` — test name: `{pattern}_{scenario}_{transport}` (`_tcp` or `_unix`)

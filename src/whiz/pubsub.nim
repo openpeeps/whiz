@@ -66,6 +66,7 @@ type
   PubSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    batchWrites: bool
     server: TcpServer
     subs: seq[Subscriber]
     authMech: string
@@ -80,6 +81,7 @@ type
   SubSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    batchWrites: bool
     pubConns: seq[ZmtpConnection]
     subscriptions: seq[string]
     onMessage*: proc(topic: openArray[byte]; data: openArray[byte]) {.closure.}
@@ -138,6 +140,17 @@ proc setCurveExpectedVouch*(s: PubSocket | SubSocket; vouchPub: array[32, uint8]
   s.requireVouch = true
   if s.authMech == "": s.authMech = "CURVE"
 
+proc setBatching*(pub: PubSocket; on: bool = true) =
+  ## Coalesces sends into bulk writes. Enable for floods.
+  pub.batchWrites = on
+  for sub in pub.subs:
+    if sub.zc != nil: sub.zc.conn.setBatching(on)
+
+proc setBatching*(sub: SubSocket; on: bool = true) =
+  sub.batchWrites = on
+  for zc in sub.pubConns:
+    zc.conn.setBatching(on)
+
 proc pendingBytes*(pub: PubSocket): int =
   var total = 0
   for sub in pub.subs:
@@ -168,6 +181,7 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PUB"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
       if ps.hasVouch:
@@ -268,6 +282,7 @@ proc connect*(sub: SubSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "SUB"
     conn.data = cast[pointer](zc)
+    applyConnBatching(sub, zc)
     if sub.authMech == "CURVE":
       curve.setCurveKeypair(zc, sub.authPubKey, sub.authSecKey)
       if sub.authSrvKey != default(array[32, uint8]):

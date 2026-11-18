@@ -19,6 +19,7 @@ type
   PushSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    batchWrites: bool
     server:     TcpServer
     conns:      seq[ZmtpConnection]
     rrIndex:    int
@@ -35,6 +36,7 @@ type
   PullSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    batchWrites: bool
     server:     TcpServer
     conns:      seq[ZmtpConnection]
     onMessage*: proc(data: openArray[byte]) {.closure.}
@@ -93,6 +95,12 @@ proc setCurveExpectedVouch*(s: PushSocket | PullSocket; vouchPub: array[32, uint
   s.requireVouch = true
   if s.authMech == "": s.authMech = "CURVE"
 
+proc setBatching*(s: PushSocket | PullSocket; on: bool = true) =
+  ## Coalesces sends into bulk writes. Enable for floods.
+  s.batchWrites = on
+  for zc in s.conns:
+    zc.conn.setBatching(on)
+
 proc pendingBytes*(s: PushSocket | PullSocket): int =
   var total = 0
   for zc in s.conns:
@@ -150,6 +158,7 @@ proc `bind`*(push: PushSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PUSH"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
       if ps.hasVouch:
@@ -196,6 +205,7 @@ proc connect*(push: PushSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PUSH"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
       if ps.hasVouch:
@@ -287,6 +297,7 @@ proc `bind`*(pull: PullSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PULL"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
       if ps.hasVouch:
@@ -338,6 +349,7 @@ proc connect*(pull: PullSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PULL"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
       if ps.hasVouch:

@@ -18,6 +18,7 @@ type
   ReqSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    batchWrites: bool
     conn:       ZmtpConnection
     waiting:    bool
     onReply*:   proc(data: openArray[byte]) {.closure.}
@@ -34,6 +35,7 @@ type
   RepSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    batchWrites: bool
     conn:       ZmtpConnection
     server:     TcpServer
     hasRequest: bool
@@ -93,6 +95,12 @@ proc setCurveExpectedVouch*(s: ReqSocket | RepSocket; vouchPub: array[32, uint8]
   s.requireVouch = true
   if s.authMech == "": s.authMech = "CURVE"
 
+proc setBatching*(s: ReqSocket | RepSocket; on: bool = true) =
+  ## Coalesces sends into bulk writes. Enable for floods.
+  s.batchWrites = on
+  if s.conn != nil:
+    s.conn.conn.setBatching(on)
+
 proc pendingBytes*(s: ReqSocket | RepSocket): int =
   if s.conn != nil: s.conn.pendingBytes()
   else: 0
@@ -141,6 +149,7 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "REQ"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
@@ -238,6 +247,7 @@ proc `bind`*(rep: RepSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "REP"
     conn.data = cast[pointer](zc)
+    applyConnBatching(ps, zc)
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)

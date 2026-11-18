@@ -175,16 +175,23 @@ proc sendFrame*(zc: ZmtpConnection; flags: byte; body: openArray[byte]): int =
   else:
     # Zero-copy path — reference body directly
     if body.len <= 255:
-      var hdr: array[2, byte]
-      hdr[0] = flags
-      hdr[1] = byte(body.len)
-      if body.len > 0:
+      if body.len <= 64:
+        # Single-send fast path for tiny frames: one contiguous stack
+        # buffer instead of a 2-part writev (skips iovec setup).
+        var buf: array[66, byte]
+        buf[0] = flags
+        buf[1] = byte(body.len)
+        if body.len > 0:
+          copyMem(addr buf[2], unsafeAddr body[0], body.len)
+        result = zc.conn.send(buf.toOpenArray(0, body.len + 1))
+      else:
+        var hdr: array[2, byte]
+        hdr[0] = flags
+        hdr[1] = byte(body.len)
         result = zc.conn.sendv([
           (cast[ptr UncheckedArray[byte]](addr hdr[0]), 2),
           (cast[ptr UncheckedArray[byte]](unsafeAddr body[0]), body.len)
         ])
-      else:
-        result = zc.conn.send(hdr)
     else:
       var hdr: array[10, byte]
       hdr[0] = flags or ZmtpLong
@@ -234,6 +241,14 @@ proc toStr*(data: openArray[byte]): string =
   if data.len > 0:
     copyMem(addr result[0], unsafeAddr data[0], data.len)
 
+template applyConnBatching*(ps, zc) =
+  ## Applies socket-level connection flags to a freshly set-up
+  ## ZmtpConnection. Currently: write batching (see `setBatching` on the
+  ## socket types) — coalesces floods into bulk writes instead of one
+  ## syscall per message. No-op unless the socket enabled it.
+  if ps.batchWrites:
+    zc.conn.setBatching(true)
+
 proc sendMultipart*(zc: ZmtpConnection; frames: openArray[seq[byte]]): bool {.discardable.} =
   ## Sends a multipart message. Every frame but the last carries ZmtpMore.
   ## Returns true only when every frame was accepted by the transport.
@@ -259,6 +274,52 @@ template consume(zc: ZmtpConnection; n: int) =
   zc.recvLen -= n
   if zc.recvLen == 0:
     zc.recvOff = 0
+
+template establishedFrame(zc: ZmtpConnection; flags: byte; body: ptr byte;
+                          bodyLen, consumed: int; commit: untyped) =
+  ## Shared ZmtpEstablished frame handling for both the staging path
+  ## (`commit` = consume from recvBuf) and the zero-copy fast path
+  ## (`commit` = advance the read-chunk cursor). Bodies are either copied
+  ## into owned seqs (multipart accumulation, decryption) or delivered as
+  ## transient views valid only for the callback — same contract as before.
+  if (flags and ZmtpCommand) != 0:
+    if body != nil and bodyLen > 0:
+      handleCommand(zc, body, bodyLen)
+    commit
+  elif zc.onMultipart != nil:
+    var frame = newSeq[byte](bodyLen)
+    if bodyLen > 0:
+      copyMem(addr frame[0], body, bodyLen)
+      if zc.mechDecrypt != nil and not zc.mechDecrypt(zc, frame):
+        if zc.onError != nil: zc.onError(zc, "Decryption failed")
+        zc.state = ZmtpClosed
+    if zc.state != ZmtpClosed:
+      zc.pendingFrames.add(frame)
+      zc.pendingBytes += bodyLen
+      if zc.pendingBytes > MaxMultipartBytes:
+        if zc.onError != nil: zc.onError(zc, "Multipart message too large")
+        zc.state = ZmtpClosed
+      elif (flags and ZmtpMore) == 0:
+        let msg = zc.pendingFrames
+        zc.pendingFrames = @[]
+        zc.pendingBytes = 0
+        zc.onMultipart(zc, msg)
+    commit
+  else:
+    if body != nil and bodyLen > 0:
+      let raw = cast[ptr UncheckedArray[byte]](body)
+      if zc.mechDecrypt != nil:
+        var msg = newSeq[byte](bodyLen)
+        copyMem(addr msg[0], raw, bodyLen)
+        if not zc.mechDecrypt(zc, msg):
+          if zc.onError != nil: zc.onError(zc, "Decryption failed")
+          zc.state = ZmtpClosed
+        elif zc.onMessage != nil:
+          zc.onMessage(zc, msg)
+      else:
+        if zc.onMessage != nil:
+          zc.onMessage(zc, raw.toOpenArray(0, bodyLen - 1))
+    commit
 
 proc parseReadyProps(zc: ZmtpConnection; buf: ptr byte; len: int) =
   let d = cast[ptr UncheckedArray[byte]](buf)
@@ -336,7 +397,31 @@ proc readFrame(zc: ZmtpConnection; buf: ptr byte; rlen: int): tuple[ok: bool; fl
     result = (true, flags, addr b[2], size, 2 + size)
 
 proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
-  if zc.state == ZmtpClosed: return
+  if zc.state == ZmtpClosed or data.len == 0: return
+  if zc.recvLen == 0 and zc.state == ZmtpEstablished:
+    # Zero-copy fast path: nothing staged, so parse directly from the
+    # read chunk instead of copying it into recvBuf first. Only a
+    # trailing partial frame is staged. Delivered views borrow `data`
+    # and are valid only for the callback — same contract as before
+    # (they used to borrow the reused recvBuf).
+    var off = 0
+    while off < data.len and zc.state == ZmtpEstablished:
+      let (ok, flags, body, bodyLen, consumed) =
+        readFrame(zc, cast[ptr byte](unsafeAddr data[off]), data.len - off)
+      if not ok: break
+      establishedFrame(zc, flags, body, bodyLen, consumed, off += consumed)
+    if zc.state != ZmtpEstablished:
+      return # ERROR command closed us; drop the rest like `done` would
+    if off < data.len:
+      let rem = data.len - off
+      if zc.recvBuf.len < rem:
+        zc.recvBuf.setLen(rem)
+      copyMem(addr zc.recvBuf[0], unsafeAddr data[off], rem)
+      zc.recvOff = 0
+      zc.recvLen = rem
+    elif zc.recvBuf.len > 8192:
+      zc.recvBuf.setLen(4096)
+    return
   if zc.recvOff > 0:
     if zc.recvLen > 0:
       copyMem(addr zc.recvBuf[0], addr zc.recvBuf[zc.recvOff], zc.recvLen)
@@ -417,47 +502,10 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
       let (ok, flags, body, bodyLen, consumed) = readFrame(zc, buf, zc.recvLen)
       if not ok:
         done = true
-      elif (flags and ZmtpCommand) != 0:
-        if body != nil and bodyLen > 0:
-          handleCommand(zc, body, bodyLen)
-        zc.consume(consumed)
-      elif zc.onMultipart != nil:
-        var frame = newSeq[byte](bodyLen)
-        if bodyLen > 0:
-          copyMem(addr frame[0], body, bodyLen)
-          if zc.mechDecrypt != nil and not zc.mechDecrypt(zc, frame):
-            if zc.onError != nil: zc.onError(zc, "Decryption failed")
-            zc.state = ZmtpClosed
-            done = true
-        if zc.state != ZmtpClosed:
-          zc.pendingFrames.add(frame)
-          zc.pendingBytes += bodyLen
-          if zc.pendingBytes > MaxMultipartBytes:
-            if zc.onError != nil: zc.onError(zc, "Multipart message too large")
-            zc.state = ZmtpClosed
-            done = true
-          elif (flags and ZmtpMore) == 0:
-            let msg = zc.pendingFrames
-            zc.pendingFrames = @[]
-            zc.pendingBytes = 0
-            zc.onMultipart(zc, msg)
-        zc.consume(consumed)
       else:
-        if body != nil and bodyLen > 0:
-          let raw = cast[ptr UncheckedArray[byte]](body)
-          if zc.mechDecrypt != nil:
-            var msg = newSeq[byte](bodyLen)
-            copyMem(addr msg[0], raw, bodyLen)
-            if not zc.mechDecrypt(zc, msg):
-              if zc.onError != nil: zc.onError(zc, "Decryption failed")
-              zc.state = ZmtpClosed
-              done = true
-            elif zc.onMessage != nil:
-              zc.onMessage(zc, msg)
-          else:
-            if zc.onMessage != nil:
-              zc.onMessage(zc, raw.toOpenArray(0, bodyLen - 1))
-        zc.consume(consumed)
+        establishedFrame(zc, flags, body, bodyLen, consumed, zc.consume(consumed))
+        if zc.state == ZmtpClosed:
+          done = true
 
     of ZmtpClosed:
       done = true
