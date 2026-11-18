@@ -44,7 +44,78 @@
 
 
 ## Examples
-...
+
+Runnable programs live in [`examples/`](examples/) (each file runs standalone).
+Build with clue (`clue build examples/pair.nim -o:/tmp/ex-pair`) or plain Nim
+(`nim c -r examples/pair.nim`):
+
+| File | What it shows |
+|---|---|
+| `examples/pair.nim` | PAIR 1-to-1 bidirectional messaging |
+| `examples/pubsub.nim` | PUB/SUB with topic filtering |
+| `examples/reqrep.nim` | REQ/REP strict request-reply |
+| `examples/pushpull.nim` | PUSH/PULL pipeline |
+| `examples/clientserver.nim` | CLIENT/SERVER with routing handles |
+| `examples/curve.nim` | CURVE encrypted PAIR (X25519 + AEAD) |
+| `examples/curve_vouch.nim` | CURVE + Ed25519 vouch (key continuity) |
+| `examples/tls.nim` | PAIR over TLS + ALPN/kTLS options (POSIX, needs `openssl` CLI) |
+| `examples/ws_pair.nim` | PAIR over WebSocket + deflate/ping options |
+| `examples/filetx.nim` | File transfer over a PAIR connection |
+
+PAIR:
+
+```nim
+import whiz/pair
+let loop = newLoop()
+let srv = newPairSocket(loop)
+srv.`bind`("127.0.0.1", 5550)
+let cli = newPairSocket(loop)
+srv.onMessage = proc(data: openArray[byte]) =
+  discard srv.send("hello from server")
+cli.onMessage = proc(data: openArray[byte]) =
+  loop.stop()
+discard loop.addTimer(50) do (id: int):
+  cli.connect("127.0.0.1", 5550)
+discard loop.addTimer(250) do (id: int):
+  discard cli.send("hello from client")
+loop.run()
+```
+
+REQ/REP:
+
+```nim
+import whiz/reqrep
+let loop = newLoop()
+let rep = newRepSocket(loop)
+rep.`bind`("127.0.0.1", 5552)
+let req = newReqSocket(loop)
+rep.onRequest = proc(data: openArray[byte]) =
+  discard rep.send("reply")
+req.onReply = proc(data: openArray[byte]) =
+  loop.stop()
+discard loop.addTimer(50) do (id: int):
+  req.connect("127.0.0.1", 5552)
+discard loop.addTimer(250) do (id: int):
+  discard req.send("hello")
+loop.run()
+```
+
+CURVE + vouch:
+
+```nim
+import whiz/pair, whiz/curve
+let (srvSec, srvPub) = generateCurveKeypair()
+let (cliSec, cliPub) = generateCurveKeypair()
+let (vouchSec, vouchPub) = generateVouchKeypair()
+let loop = newLoop()
+let srv = newPairSocket(loop)
+srv.setCurveKeypair(srvPub, srvSec)
+srv.setCurveExpectedVouch(vouchPub) # reject HELLOs without this vouch
+srv.`bind`("127.0.0.1", 5556)
+let cli = newPairSocket(loop)
+cli.setCurveClient(cliPub, cliSec, srvPub)
+cli.setCurveVouch(vouchPub, vouchSec)
+```
 
 ### Benchmarks
 > [!NOTE]
