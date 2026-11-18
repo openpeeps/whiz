@@ -23,15 +23,6 @@ jobs:
         with:
           nim-version: ${{ matrix.nim-version }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install Monocypher from source
-        run: |
-          curl -LO https://monocypher.org/download/monocypher-4.0.2.tar.gz
-          tar -xzf monocypher-4.0.2.tar.gz
-          cd monocypher-4.0.2
-          make
-          sudo make install
-          sudo ldconfig
-          cd ..
       - run: nimble install -Y
       - run: nim c src/${{ github.event.repository.name }}.nim
       - run: nimble test

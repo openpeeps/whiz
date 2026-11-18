@@ -37,6 +37,11 @@ type
     authUser, authPass: string
     authZapHandler: ZapHandler
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
   ServerSocket* = ref object
     loop:       Loop
@@ -51,6 +56,11 @@ type
     authUser, authPass: string
     authZapHandler: ZapHandler
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
 proc setCurveKeypair*(s: ClientSocket | ServerSocket; publicKey, secretKey: array[32, uint8]) =
   s.authMech = "CURVE"
@@ -81,9 +91,47 @@ proc setTlsClient*(s: ClientSocket | ServerSocket; verifyPeer = true; serverName
   ## before connect. Pass verifyPeer=false for self-signed test certs.
   enableTlsClient(s.tls, verifyPeer, serverName)
 
+proc setTlsAlpn*(s: ClientSocket | ServerSocket; protos: openArray[string]) =
+  if s.tls != nil:
+    s.tls.setTlsAlpn(protos)
+
+proc setTlsKtlsAuto*(s: ClientSocket | ServerSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.enableTlsKtls(zerocopySendfile)
+
+proc setTlsKtlsRequired*(s: ClientSocket | ServerSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.configureTlsKtls(KtlsRequired, zerocopySendfile)
+
+proc setCurveVouch*(s: ClientSocket | ServerSocket; vouchPub: array[32, uint8];
+                     vouchSec: array[64, uint8]) =
+  s.authVouchPub = vouchPub
+  s.authVouchSec = vouchSec
+  s.hasVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc setCurveExpectedVouch*(s: ClientSocket | ServerSocket; vouchPub: array[32, uint8]) =
+  s.expectedVouchPub = vouchPub
+  s.requireVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc pendingBytes*(cli: ClientSocket): int =
+  if cli.conn != nil: cli.conn.pendingBytes()
+  else: 0
+
+proc pendingBytes*(srv: ServerSocket): int =
+  var total = 0
+  for c in srv.clients:
+    if c.zc != nil: total += c.zc.pendingBytes()
+  total
+
+
 proc applyClientServerAuth(zc: ZmtpConnection; authMech: string;
     pubKey, secKey, srvKey: array[32, uint8];
-    user, pass: string; zap: ZapHandler) =
+    user, pass: string; zap: ZapHandler;
+    hasVouch = false; vouchPub: array[32, uint8] = default(array[32, uint8]);
+    vouchSec: array[64, uint8] = default(array[64, uint8]);
+    requireVouch = false; expectedVouch: array[32, uint8] = default(array[32, uint8])) =
   if authMech == "PLAIN":
     auth.setPlainAuth(zc, user, pass)
     if zap != nil:
@@ -92,6 +140,10 @@ proc applyClientServerAuth(zc: ZmtpConnection; authMech: string;
     curve.setCurveKeypair(zc, pubKey, secKey)
     if srvKey != default(array[32, uint8]):
       curve.setCurveServerKey(zc, srvKey)
+    if hasVouch:
+      curve.setCurveVouch(zc, vouchPub, vouchSec)
+    if requireVouch:
+      curve.setCurveExpectedVouch(zc, expectedVouch)
 
 # ── ClientSocket ────────────────────────────────────────────────────────────
 
@@ -152,7 +204,8 @@ proc `bind`*(cli: ClientSocket; address: string; port: int = 0;
     zc.socketType = "CLIENT"
     conn.data = cast[pointer](zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
-      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler)
+      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
+      ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
     ps.conn = zc
     wireClientHandlers(ps, zc)
 
@@ -184,7 +237,8 @@ proc connect*(cli: ClientSocket; address: string; port: int = 0;
     zc.socketType = "CLIENT"
     conn.data = cast[pointer](zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
-      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler)
+      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
+      ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
     ps.conn = zc
     wireClientHandlers(ps, zc)
 
@@ -286,7 +340,8 @@ proc `bind`*(srv: ServerSocket; address: string; port: int = 0;
     zc.socketType = "SERVER"
     conn.data = cast[pointer](zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
-      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler)
+      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
+      ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
     let client = ServerClient(id: ps.nextId, zc: zc)
     inc ps.nextId
     ps.clients.add(client)
@@ -320,7 +375,8 @@ proc connect*(srv: ServerSocket; address: string; port: int = 0;
     zc.socketType = "SERVER"
     conn.data = cast[pointer](zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
-      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler)
+      ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
+      ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
     let client = ServerClient(id: ps.nextId, zc: zc)
     inc ps.nextId
     ps.clients.add(client)

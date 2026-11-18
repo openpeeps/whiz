@@ -38,11 +38,29 @@ type
     recvKey*: Key32
     sendCtr*: uint64
     recvCtr*: uint64
+    # ── CURVE vouch (Ed25519 key continuity) ──
+    # Optional. When the client sets vouchSecret/vouchPub, HELLO carries
+    # vouchPub + sign(ephPub). Servers verify the signature and, when
+    # requireVouch is set, reject HELLOs without a valid vouch.
+    vouchSecret*: SecretKey
+    vouchPub*: PublicKey
+    hasVouch*: bool
+    expectedVouchPub*: PublicKey
+    requireVouch*: bool
+    peerVouchPub*: PublicKey
+    hasPeerVouch*: bool
 
 proc generateCurveKeypair*(): tuple[secret: Key32, public: Key32] =
   let kp = x25519KeyPair()
   result.secret = kp[0]
   result.public = kp[1]
+
+proc generateVouchKeypair*(): tuple[secret: SecretKey, public: PublicKey] =
+  ## Generates an Ed25519 vouch keypair for CURVE key continuity.
+  ## The secret signs the ephemeral key in HELLO; the server verifies it.
+  let kp = generateSigningKeypair()
+  result.secret = kp.secretKey.data
+  result.public = kp.publicKey
 
 # ── Key derivation ──────────────────────────────────────────────────────────
 
@@ -149,6 +167,7 @@ proc installCryptoHooks(zc: ZmtpConnection; cs: CurveState) =
     cs.masterKey.wipe()
     cs.permSecret.wipe()
     cs.ephSecret.wipe()
+    cs.vouchSecret.wipe()
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -167,6 +186,22 @@ proc setupCurveHandshake*(zc: ZmtpConnection; cs: CurveState) =
         if dataLen < 64: return false
         copyMem(addr cs.peerPermPublic[0], unsafeAddr body[dataOff], 32)
         copyMem(addr cs.peerEphPublic[0], unsafeAddr body[dataOff + 32], 32)
+        # Optional vouch: [vouchPub(32) + sig(64)] over ephPub
+        if dataLen >= 160:
+          var vouchPub: PublicKey
+          var sig: Signature
+          copyMem(addr vouchPub[0], unsafeAddr body[dataOff + 64], 32)
+          copyMem(addr sig[0], unsafeAddr body[dataOff + 96], 64)
+          var ephBytes: array[32, uint8]
+          copyMem(addr ephBytes[0], unsafeAddr body[dataOff + 32], 32)
+          if not verify(vouchPub, ephBytes, sig):
+            return false
+          if cs.requireVouch and vouchPub != cs.expectedVouchPub:
+            return false
+          cs.peerVouchPub = vouchPub
+          cs.hasPeerVouch = true
+        elif cs.requireVouch:
+          return false
         (cs.ephSecret, cs.ephPublic) = x25519KeyPair()
         var ecdhEE, ecdhCE, ecdhSE: Key32
         ecdhEE = sharedSecret(cs.ephSecret, cs.peerEphPublic).data
@@ -196,7 +231,13 @@ proc setupCurveHandshake*(zc: ZmtpConnection; cs: CurveState) =
         if cs.permPublic == default(array[32, uint8]):
           (cs.permSecret, cs.permPublic) = x25519KeyPair()
         (cs.ephSecret, cs.ephPublic) = x25519KeyPair()
-        discard zc.sendCommand("HELLO", concat(@(cs.permPublic), @(cs.ephPublic)))
+        var helloPayload = concat(@(cs.permPublic), @(cs.ephPublic))
+        if cs.hasVouch:
+          var ephArr: array[32, uint8]
+          copyMem(addr ephArr[0], addr cs.ephPublic[0], 32)
+          let sig = sign(cs.vouchSecret, ephArr)
+          helloPayload = concat(helloPayload, @(cs.vouchPub), @(sig))
+        discard zc.sendCommand("HELLO", helloPayload)
         cs.phase = cpWaitWelcome
       of cpWaitWelcome:
         if body.len < 9: return false
@@ -252,4 +293,30 @@ proc setCurveClient*(zc: ZmtpConnection; publicKey, secretKey, serverKey: Key32)
   cs.permPublic = publicKey
   cs.permSecret = secretKey
   cs.serverPub = serverKey
+  setupCurveHandshake(zc, cs)
+
+proc setCurveVouch*(zc: ZmtpConnection; vouchPub: PublicKey; vouchSecret: SecretKey) =
+  ## Enables CURVE vouch on a client connection. HELLO will carry
+  ## vouchPub + Ed25519(sig over ephPub). Call before the handshake starts
+  ## (before bind/connect logic creates the handshake).
+  var cs: CurveState
+  if zc.mechData != nil and zc.mechData of CurveState:
+    cs = CurveState(zc.mechData)
+  else:
+    cs = CurveState(isServer: zc.asServer, phase: cpInit)
+  cs.vouchPub = vouchPub
+  cs.vouchSecret = vouchSecret
+  cs.hasVouch = true
+  setupCurveHandshake(zc, cs)
+
+proc setCurveExpectedVouch*(zc: ZmtpConnection; vouchPub: PublicKey) =
+  ## Requires the peer to present a valid vouch for this key. Servers
+  ## reject HELLOs without a matching valid vouch.
+  var cs: CurveState
+  if zc.mechData != nil and zc.mechData of CurveState:
+    cs = CurveState(zc.mechData)
+  else:
+    cs = CurveState(isServer: zc.asServer, phase: cpInit)
+  cs.expectedVouchPub = vouchPub
+  cs.requireVouch = true
   setupCurveHandshake(zc, cs)

@@ -448,6 +448,18 @@ proc feed*(zc: ZmtpConnection; data: openArray[byte]) =
 
 # ── Connection setup ─────────────────────────────────────────────────────────
 
+proc pendingBytes*(zc: ZmtpConnection): int =
+  ## Bytes queued in powpow userspace write buffers for this connection
+  ## (0 = fully drained). Backpressure signal covering ZMTP greeting,
+  ## frames, TLS output and filetx fallback buffers.
+  if zc == nil or zc.conn == nil: return 0
+  zc.conn.pendingBytes()
+
+proc flushWriteBuffer*(zc: ZmtpConnection): bool =
+  ## Kicks the powpow write pump; returns true when fully drained.
+  if zc == nil or zc.conn == nil: return true
+  zc.conn.flushWriteBuffer()
+
 proc initZmtpConnection*(conn: Connection; asServer: bool; mechanism: string = "NULL"; skipGreeting: bool = false): ZmtpConnection =
   result = ZmtpConnection(
     conn: conn,

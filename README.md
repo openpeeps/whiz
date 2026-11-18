@@ -34,10 +34,11 @@
 - [x] CURVE security mechanism (X25519 + AEAD)
 - [ ] RADIO/DISH (dgram) socket pattern
 - [x] CLIENT/SERVER (stream) socket pattern
-- [ ] CURVE vouch (Ed25519 signature in HELLO for key continuity)
-- [ ] TLS/DTLS transport
+- [x] CURVE vouch (Ed25519 signature in HELLO for key continuity)
+- [x] TLS transport (TCP, POSIX) + kTLS/ALPN options
+- [ ] DTLS transport
 - [ ] GSSAPI / Kerberos mechanism
-- [x] WebSocket transport (RFC 6455)
+- [x] WebSocket transport (RFC 6455 + permessage-deflate/ping options)
 - [ ] Formal ZMTP conformance tests
 - [ ] Performance benchmarks vs ØMQ
 

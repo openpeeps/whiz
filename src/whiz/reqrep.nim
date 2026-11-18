@@ -24,6 +24,11 @@ type
     authMech:   string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
   RepSocket* = ref object
     loop:       Loop
@@ -35,6 +40,11 @@ type
     authMech:   string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
 proc setCurveKeypair*(rep: RepSocket; publicKey, secretKey: array[32, uint8]) =
   rep.authMech = "CURVE"
@@ -56,6 +66,35 @@ proc setTlsClient*(s: ReqSocket | RepSocket; verifyPeer = true; serverName = "")
   ## Enables TLS for outbound connections (TCP only, POSIX only). Call
   ## before connect. Pass verifyPeer=false for self-signed test certs.
   enableTlsClient(s.tls, verifyPeer, serverName)
+
+proc setTlsAlpn*(s: ReqSocket | RepSocket; protos: openArray[string]) =
+  if s.tls != nil:
+    s.tls.setTlsAlpn(protos)
+
+proc setTlsKtlsAuto*(s: ReqSocket | RepSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.enableTlsKtls(zerocopySendfile)
+
+proc setTlsKtlsRequired*(s: ReqSocket | RepSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.configureTlsKtls(KtlsRequired, zerocopySendfile)
+
+proc setCurveVouch*(s: ReqSocket | RepSocket; vouchPub: array[32, uint8];
+                     vouchSec: array[64, uint8]) =
+  s.authVouchPub = vouchPub
+  s.authVouchSec = vouchSec
+  s.hasVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc setCurveExpectedVouch*(s: ReqSocket | RepSocket; vouchPub: array[32, uint8]) =
+  s.expectedVouchPub = vouchPub
+  s.requireVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc pendingBytes*(s: ReqSocket | RepSocket): int =
+  if s.conn != nil: s.conn.pendingBytes()
+  else: 0
+
 
 # ── REQ ─────────────────────────────────────────────────────────────────────
 
@@ -93,8 +132,16 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.hasVouch:
+        curve.setCurveVouch(zc, ps.authVouchPub, ps.authVouchSec)
+      if ps.requireVouch:
+        curve.setCurveExpectedVouch(zc, ps.expectedVouchPub)
       if ps.authSrvKey != default(array[32, uint8]):
         curve.setCurveServerKey(zc, ps.authSrvKey)
+      if ps.hasVouch:
+        curve.setCurveVouch(zc, ps.authVouchPub, ps.authVouchSec)
+      if ps.requireVouch:
+        curve.setCurveExpectedVouch(zc, ps.expectedVouchPub)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "REP":
@@ -172,6 +219,10 @@ proc `bind`*(rep: RepSocket; address: string; port: int = 0;
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.hasVouch:
+        curve.setCurveVouch(zc, ps.authVouchPub, ps.authVouchSec)
+      if ps.requireVouch:
+        curve.setCurveExpectedVouch(zc, ps.expectedVouchPub)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "REQ":

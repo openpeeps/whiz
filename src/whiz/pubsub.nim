@@ -61,6 +61,11 @@ type
     authMech: string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
   SubSocket* = ref object
     loop: Loop
@@ -71,6 +76,11 @@ type
     authMech: string
     authPubKey, authSecKey, authSrvKey: array[32, uint8]
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
 proc setCurveKeypair*(pub: PubSocket; publicKey, secretKey: array[32, uint8]) =
   pub.authMech = "CURVE"
@@ -93,6 +103,43 @@ proc setTlsClient*(s: PubSocket | SubSocket; verifyPeer = true; serverName = "")
   ## before connect. Pass verifyPeer=false for self-signed test certs.
   enableTlsClient(s.tls, verifyPeer, serverName)
 
+proc setTlsAlpn*(s: PubSocket | SubSocket; protos: openArray[string]) =
+  if s.tls != nil:
+    s.tls.setTlsAlpn(protos)
+
+proc setTlsKtlsAuto*(s: PubSocket | SubSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.enableTlsKtls(zerocopySendfile)
+
+proc setTlsKtlsRequired*(s: PubSocket | SubSocket; zerocopySendfile = false) =
+  if s.tls == nil: s.tls = TlsConfig()
+  s.tls.configureTlsKtls(KtlsRequired, zerocopySendfile)
+
+proc setCurveVouch*(s: PubSocket | SubSocket; vouchPub: array[32, uint8];
+                     vouchSec: array[64, uint8]) =
+  s.authVouchPub = vouchPub
+  s.authVouchSec = vouchSec
+  s.hasVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc setCurveExpectedVouch*(s: PubSocket | SubSocket; vouchPub: array[32, uint8]) =
+  s.expectedVouchPub = vouchPub
+  s.requireVouch = true
+  if s.authMech == "": s.authMech = "CURVE"
+
+proc pendingBytes*(pub: PubSocket): int =
+  var total = 0
+  for sub in pub.subs:
+    if sub.zc != nil: total += sub.zc.pendingBytes()
+  total
+
+proc pendingBytes*(sub: SubSocket): int =
+  var total = 0
+  for zc in sub.pubConns:
+    total += zc.pendingBytes()
+  total
+
+
 # ── PubSocket ────────────────────────────────────────────────────────────────
 
 proc newPubSocket*(loop: Loop; address: string; port: int = 0;
@@ -112,6 +159,10 @@ proc newPubSocket*(loop: Loop; address: string; port: int = 0;
     conn.data = cast[pointer](zc)
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
+      if ps.hasVouch:
+        curve.setCurveVouch(zc, ps.authVouchPub, ps.authVouchSec)
+      if ps.requireVouch:
+        curve.setCurveExpectedVouch(zc, ps.expectedVouchPub)
     var sub = Subscriber(zc: zc, topics: @[])
 
     zc.onReady = proc(zc: ZmtpConnection) =
@@ -190,6 +241,10 @@ proc connect*(sub: SubSocket; address: string; port: int = 0;
       curve.setCurveKeypair(zc, sub.authPubKey, sub.authSecKey)
       if sub.authSrvKey != default(array[32, uint8]):
         curve.setCurveServerKey(zc, sub.authSrvKey)
+      if sub.hasVouch:
+        curve.setCurveVouch(zc, sub.authVouchPub, sub.authVouchSec)
+      if sub.requireVouch:
+        curve.setCurveExpectedVouch(zc, sub.expectedVouchPub)
 
     zc.onReady = proc(zc: ZmtpConnection) =
       if zc.peerSocketType != "PUB":

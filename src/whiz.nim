@@ -17,9 +17,11 @@
 ##   - `import whiz/filetx`     — File transfer over ZMTP
 ##   - `import whiz/ws`         — WebSocket transport (all patterns over WS)
 ##   - `import whiz/tls`        — TLS transport config (TCP, POSIX only)
+##   - `import whiz/curve`      — CURVE security (X25519 + vouch)
+##   - `import whiz/auth`       — PLAIN + ZAP auth
 ##
 ## Or import everything at once with:
-##   `import whiz/[zmtp, pair, pubsub, reqrep, pushpull, clientserver, filetx, ws]`
+##   `import whiz/[zmtp, pair, pubsub, reqrep, pushpull, clientserver, filetx, ws, tls, curve, auth]`
 
 when isMainModule:
   echo "WhizMQ — ZMTP 3.0 message queue library"
@@ -32,4 +34,7 @@ else:
            "  import whiz/clientserver — CLIENT/SERVER (stream)\n" &
           "  import whiz/zmtp      — ZMTP 3.0 wire protocol primitives\n" &
           "  import whiz/filetx    — File transfer over ZMTP\n" &
-          "  import whiz/ws        — WebSocket transport\n")
+          "  import whiz/ws        — WebSocket transport\n" &
+          "  import whiz/tls       — TLS transport config\n" &
+          "  import whiz/curve     — CURVE security + vouch\n" &
+          "  import whiz/auth      — PLAIN + ZAP auth\n")

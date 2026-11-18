@@ -13,6 +13,25 @@ import powpow/[loop, types, net/tcp, proto/ws]
 import ./zmtp
 export loop, types, tcp, ws, zmtp
 
+type
+  WsTransportOptions* = object
+    ## Optional WebSocket transport tuning. All fields have safe defaults
+    ## matching the previous behaviour (no compression, no keepalive pings).
+    permessageDeflate*: bool  ## Negotiate RFC 7692 deflate when peer offers it
+    pingIntervalMs*: int      ## Server/client keepalive ping interval (0 = off)
+    maxFrameSize*: int        ## Max WS frame payload; 0 means powpow default
+    idleTimeoutMs*: int       ## Client idle timeout after upgrade (0 = off)
+
+proc defaultWsOptions*(): WsTransportOptions =
+  WsTransportOptions(permessageDeflate: false, pingIntervalMs: 0,
+                     maxFrameSize: DefaultMaxFrameSize, idleTimeoutMs: 0)
+
+proc newWsServerWithOpts*(loop: Loop; opts: WsTransportOptions): WsServer =
+  let maxF = if opts.maxFrameSize > 0: opts.maxFrameSize else: DefaultMaxFrameSize
+  newWsServer(loop, maxFrameSize = maxF,
+              pingIntervalMs = opts.pingIntervalMs,
+              permessageDeflate = opts.permessageDeflate)
+
 # ── ZMTP ↔ WebSocket bridge ──────────────────────────────────────────────────
 
 proc wsBridge(zc: ZmtpConnection, ws: WsConnection) =
@@ -63,8 +82,15 @@ proc close*(s: WsPairSocket) =
     s.wss = nil
   if s.onClose != nil: s.onClose()
 
-proc `bind`*(s: WsPairSocket; address: string; port: int) =
-  s.wss = newWsServer(s.loop)
+proc pendingBytes*(s: WsPairSocket): int =
+  ## Bytes queued in the underlying WS/TCP write buffers (0 = drained).
+  if s.ws != nil: s.ws.pendingBytes()
+  elif s.zc != nil: s.zc.pendingBytes()
+  else: 0
+
+proc `bind`*(s: WsPairSocket; address: string; port: int;
+             opts: WsTransportOptions = defaultWsOptions()) =
+  s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     if s.zc != nil:
       ws.closeWs(1000, "Only one connection allowed")
@@ -88,8 +114,10 @@ proc `bind`*(s: WsPairSocket; address: string; port: int) =
     wsSendGreeting(zc, ws)
   s.wss.listen(address, port)
 
-proc connect*(s: WsPairSocket; address: string; port: int; path: string = "/") =
+proc connect*(s: WsPairSocket; address: string; port: int; path: string = "/";
+              opts: WsTransportOptions = defaultWsOptions()) =
   let self = s
+  let maxF = if opts.maxFrameSize > 0: opts.maxFrameSize else: DefaultMaxFrameSize
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
       if self.zc != nil:
@@ -120,7 +148,11 @@ proc connect*(s: WsPairSocket; address: string; port: int; path: string = "/") =
         self.onClose(),
     onError = proc(ws: WsConnection; err: string) {.closure.} =
       if self.zc != nil and self.zc.onError != nil:
-        self.zc.onError(self.zc, err))
+        self.zc.onError(self.zc, err),
+    maxFrameSize = maxF,
+    pingIntervalMs = opts.pingIntervalMs,
+    idleTimeoutMs = opts.idleTimeoutMs,
+    permessageDeflate = opts.permessageDeflate)
 
 # ── WsPubSocket ───────────────────────────────────────────────────────────────
 
@@ -155,8 +187,15 @@ proc publish*(s: WsPubSocket; data: string): bool {.discardable.} =
             result = false
           break
 
-proc `bind`*(s: WsPubSocket; address: string; port: int) =
-  s.wss = newWsServer(s.loop)
+proc pendingBytes*(s: WsPubSocket): int =
+  var total = 0
+  for sub in s.subs:
+    if sub.ws != nil: total += sub.ws.pendingBytes()
+  total
+
+proc `bind`*(s: WsPubSocket; address: string; port: int;
+             opts: WsTransportOptions = defaultWsOptions()) =
+  s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
     zc.socketType = "PUB"
@@ -226,7 +265,14 @@ proc unsubscribe*(s: WsSubSocket; topic: string) =
         copyMem(addr frame[1], addr topic[0], topic.len)
       discard zc.sendCommand("UNSUBSCRIBE", frame)
 
-proc connect*(s: WsSubSocket; address: string; port: int; path: string = "/") =
+proc pendingBytes*(s: WsSubSocket): int =
+  var total = 0
+  for w in s.ws:
+    total += w.pendingBytes()
+  total
+
+proc connect*(s: WsSubSocket; address: string; port: int; path: string = "/";
+              opts: WsTransportOptions = defaultWsOptions()) =
   let self = s
   var closed = false
   discard connectWs(s.loop, address, port, path,
@@ -299,7 +345,13 @@ proc close*(s: WsReqSocket) =
     s.zc = nil
   if s.onClose != nil: s.onClose()
 
-proc connect*(s: WsReqSocket; address: string; port: int; path: string = "/") =
+proc pendingBytes*(s: WsReqSocket): int =
+  if s.ws != nil: s.ws.pendingBytes()
+  elif s.zc != nil: s.zc.pendingBytes()
+  else: 0
+
+proc connect*(s: WsReqSocket; address: string; port: int; path: string = "/";
+              opts: WsTransportOptions = defaultWsOptions()) =
   let self = s
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
@@ -327,7 +379,11 @@ proc connect*(s: WsReqSocket; address: string; port: int; path: string = "/") =
         self.onClose(),
     onError = proc(ws: WsConnection; err: string) {.closure.} =
       if self.zc != nil and self.zc.onError != nil:
-        self.zc.onError(self.zc, err))
+        self.zc.onError(self.zc, err),
+    maxFrameSize = (if opts.maxFrameSize > 0: opts.maxFrameSize else: DefaultMaxFrameSize),
+    pingIntervalMs = opts.pingIntervalMs,
+    idleTimeoutMs = opts.idleTimeoutMs,
+    permessageDeflate = opts.permessageDeflate)
 
 # ── WsRepSocket ───────────────────────────────────────────────────────────────
 
@@ -361,8 +417,14 @@ proc close*(s: WsRepSocket) =
     s.wss.close()
     s.wss = nil
 
-proc `bind`*(s: WsRepSocket; address: string; port: int) =
-  s.wss = newWsServer(s.loop)
+proc pendingBytes*(s: WsRepSocket): int =
+  if s.ws != nil: s.ws.pendingBytes()
+  elif s.zc != nil: s.zc.pendingBytes()
+  else: 0
+
+proc `bind`*(s: WsRepSocket; address: string; port: int;
+             opts: WsTransportOptions = defaultWsOptions()) =
+  s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     if s.zc != nil:
       ws.closeWs(1000, "Only one connection allowed")
@@ -424,8 +486,15 @@ proc close*(s: WsPushSocket) =
     s.wss = nil
   if s.onClose != nil: s.onClose()
 
-proc `bind`*(s: WsPushSocket; address: string; port: int) =
-  s.wss = newWsServer(s.loop)
+proc pendingBytes*(s: WsPushSocket): int =
+  var total = 0
+  for w in s.ws:
+    total += w.pendingBytes()
+  total
+
+proc `bind`*(s: WsPushSocket; address: string; port: int;
+             opts: WsTransportOptions = defaultWsOptions()) =
+  s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
     zc.socketType = "PUSH"
@@ -459,7 +528,8 @@ proc `bind`*(s: WsPushSocket; address: string; port: int) =
     wsSendGreeting(zc, ws)
   s.wss.listen(address, port)
 
-proc connect*(s: WsPushSocket; address: string; port: int; path: string = "/") =
+proc connect*(s: WsPushSocket; address: string; port: int; path: string = "/";
+              opts: WsTransportOptions = defaultWsOptions()) =
   let self = s
   var closed = false
   discard connectWs(s.loop, address, port, path,
@@ -493,7 +563,11 @@ proc connect*(s: WsPushSocket; address: string; port: int; path: string = "/") =
       if self.zcs.len == 0 and self.onClose != nil:
         self.onClose(),
     onError = proc(ws: WsConnection; err: string) {.closure.} =
-      discard)
+      discard,
+    maxFrameSize = (if opts.maxFrameSize > 0: opts.maxFrameSize else: DefaultMaxFrameSize),
+    pingIntervalMs = opts.pingIntervalMs,
+    idleTimeoutMs = opts.idleTimeoutMs,
+    permessageDeflate = opts.permessageDeflate)
 
 # ── WsPullSocket ──────────────────────────────────────────────────────────────
 
@@ -526,8 +600,15 @@ proc close*(s: WsPullSocket) =
     s.wss = nil
   if s.onClose != nil: s.onClose()
 
-proc `bind`*(s: WsPullSocket; address: string; port: int) =
-  s.wss = newWsServer(s.loop)
+proc pendingBytes*(s: WsPullSocket): int =
+  var total = 0
+  for w in s.ws:
+    total += w.pendingBytes()
+  total
+
+proc `bind`*(s: WsPullSocket; address: string; port: int;
+             opts: WsTransportOptions = defaultWsOptions()) =
+  s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
     zc.socketType = "PULL"
@@ -564,7 +645,8 @@ proc `bind`*(s: WsPullSocket; address: string; port: int) =
     wsSendGreeting(zc, ws)
   s.wss.listen(address, port)
 
-proc connect*(s: WsPullSocket; address: string; port: int; path: string = "/") =
+proc connect*(s: WsPullSocket; address: string; port: int; path: string = "/";
+              opts: WsTransportOptions = defaultWsOptions()) =
   let self = s
   var closed = false
   discard connectWs(s.loop, address, port, path,
@@ -601,4 +683,8 @@ proc connect*(s: WsPullSocket; address: string; port: int; path: string = "/") =
       if self.zcs.len == 0 and self.onClose != nil:
         self.onClose(),
     onError = proc(ws: WsConnection; err: string) {.closure.} =
-      discard)
+      discard,
+    maxFrameSize = (if opts.maxFrameSize > 0: opts.maxFrameSize else: DefaultMaxFrameSize),
+    pingIntervalMs = opts.pingIntervalMs,
+    idleTimeoutMs = opts.idleTimeoutMs,
+    permessageDeflate = opts.permessageDeflate)

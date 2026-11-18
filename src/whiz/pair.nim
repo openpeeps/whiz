@@ -26,6 +26,11 @@ type
     authUser, authPass: string
     authZapHandler: ZapHandler
     tls: TlsConfig
+    authVouchPub: array[32, uint8]
+    authVouchSec: array[64, uint8]
+    hasVouch: bool
+    expectedVouchPub: array[32, uint8]
+    requireVouch: bool
 
 proc setCurveKeypair*(pair: PairSocket; publicKey, secretKey: array[32, uint8]) =
   pair.authMech = "CURVE"
@@ -37,6 +42,21 @@ proc setCurveClient*(pair: PairSocket; publicKey, secretKey, serverKey: array[32
   pair.authPubKey = publicKey
   pair.authSecKey = secretKey
   pair.authSrvKey = serverKey
+
+proc setCurveVouch*(pair: PairSocket; vouchPub: array[32, uint8];
+                    vouchSec: array[64, uint8]) =
+  ## Enables CURVE vouch (Ed25519 key continuity) on this socket.
+  ## Clients sign HELLO eph key; servers verify when requireVouch is set.
+  pair.authVouchPub = vouchPub
+  pair.authVouchSec = vouchSec
+  pair.hasVouch = true
+  if pair.authMech == "": pair.authMech = "CURVE"
+
+proc setCurveExpectedVouch*(pair: PairSocket; vouchPub: array[32, uint8]) =
+  ## Requires peer HELLO to carry a valid vouch for this Ed25519 key.
+  pair.expectedVouchPub = vouchPub
+  pair.requireVouch = true
+  if pair.authMech == "": pair.authMech = "CURVE"
 
 proc setPlainAuth*(pair: PairSocket; username, password: string) =
   pair.authMech = "PLAIN"
@@ -56,6 +76,29 @@ proc setTlsClient*(pair: PairSocket; verifyPeer = true; serverName = "") =
   ## before connect. Pass verifyPeer=false for self-signed test certs.
   enableTlsClient(pair.tls, verifyPeer, serverName)
 
+proc setTlsAlpn*(pair: PairSocket; protos: openArray[string]) =
+  ## Advertises ALPN protocols (e.g. `["zmtp/3.0"]`). Call after
+  ## setTlsServer/setTlsClient, before bind/connect.
+  if pair.tls != nil:
+    pair.tls.setTlsAlpn(protos)
+
+proc setTlsKtlsAuto*(pair: PairSocket; zerocopySendfile = false) =
+  ## Best-effort kernel-TLS offload for subsequently wrapped connections.
+  ## Linux + OpenSSL enable-ktls only; safe no-op elsewhere.
+  if pair.tls == nil: pair.tls = TlsConfig()
+  pair.tls.enableTlsKtls(zerocopySendfile)
+
+proc setTlsKtlsRequired*(pair: PairSocket; zerocopySendfile = false) =
+  ## Like setTlsKtlsAuto but fails closed when offload cannot engage.
+  if pair.tls == nil: pair.tls = TlsConfig()
+  pair.tls.configureTlsKtls(KtlsRequired, zerocopySendfile)
+
+proc pendingBytes*(pair: PairSocket): int =
+  ## Bytes queued in powpow write buffers for this connection (0 = drained).
+  if pair.conn != nil: pair.conn.pendingBytes()
+  else: 0
+
+
 proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
   if pair.authMech == "PLAIN":
     auth.setPlainAuth(zc, pair.authUser, pair.authPass)
@@ -65,6 +108,10 @@ proc applySocketAuth(zc: ZmtpConnection; pair: PairSocket) =
     curve.setCurveKeypair(zc, pair.authPubKey, pair.authSecKey)
     if pair.authSrvKey != default(array[32, uint8]):
       curve.setCurveServerKey(zc, pair.authSrvKey)
+    if pair.hasVouch:
+      curve.setCurveVouch(zc, pair.authVouchPub, pair.authVouchSec)
+    if pair.requireVouch:
+      curve.setCurveExpectedVouch(zc, pair.expectedVouchPub)
 
 proc newPairSocket*(loop: Loop): PairSocket =
   PairSocket(loop: loop)
