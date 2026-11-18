@@ -28,6 +28,7 @@ type
   ClientSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     server:     TcpServer
     conn:       ZmtpConnection
@@ -48,6 +49,7 @@ type
   ServerSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     server:     TcpServer
     clients:    seq[ServerClient]
@@ -131,6 +133,29 @@ proc setBatching*(srv: ServerSocket; on: bool = true) =
   for c in srv.clients:
     if c.zc != nil:
       c.zc.conn.setBatching(on)
+
+proc setSendBufferSize*(cli: ClientSocket; bytes: int) =
+  ## Hints the kernel send-buffer size for current and future connections.
+  cli.sndBufSize = bytes
+  if cli.conn != nil:
+    cli.conn.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(cli: ClientSocket; bytes: int) =
+  cli.rcvBufSize = bytes
+  if cli.conn != nil:
+    cli.conn.conn.setRecvBufferSize(bytes)
+
+proc setSendBufferSize*(srv: ServerSocket; bytes: int) =
+  srv.sndBufSize = bytes
+  for c in srv.clients:
+    if c.zc != nil:
+      c.zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(srv: ServerSocket; bytes: int) =
+  srv.rcvBufSize = bytes
+  for c in srv.clients:
+    if c.zc != nil:
+      c.zc.conn.setRecvBufferSize(bytes)
 
 proc pendingBytes*(cli: ClientSocket): int =
   if cli.conn != nil: cli.conn.pendingBytes()
@@ -230,7 +255,7 @@ proc `bind`*(cli: ClientSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "CLIENT"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
       ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
       ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
@@ -264,7 +289,7 @@ proc connect*(cli: ClientSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "CLIENT"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
       ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
       ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
@@ -378,7 +403,7 @@ proc `bind`*(srv: ServerSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "SERVER"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
       ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
       ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)
@@ -414,7 +439,7 @@ proc connect*(srv: ServerSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "SERVER"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     applyClientServerAuth(zc, ps.authMech, ps.authPubKey, ps.authSecKey,
       ps.authSrvKey, ps.authUser, ps.authPass, ps.authZapHandler,
       ps.hasVouch, ps.authVouchPub, ps.authVouchSec, ps.requireVouch, ps.expectedVouchPub)

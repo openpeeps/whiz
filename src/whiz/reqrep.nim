@@ -18,6 +18,7 @@ type
   ReqSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     conn:       ZmtpConnection
     waiting:    bool
@@ -35,6 +36,7 @@ type
   RepSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     conn:       ZmtpConnection
     server:     TcpServer
@@ -101,6 +103,17 @@ proc setBatching*(s: ReqSocket | RepSocket; on: bool = true) =
   if s.conn != nil:
     s.conn.conn.setBatching(on)
 
+proc setSendBufferSize*(s: ReqSocket | RepSocket; bytes: int) =
+  ## Hints the kernel send-buffer size for current and future connections.
+  s.sndBufSize = bytes
+  if s.conn != nil:
+    s.conn.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: ReqSocket | RepSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  if s.conn != nil:
+    s.conn.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: ReqSocket | RepSocket): int =
   if s.conn != nil: s.conn.pendingBytes()
   else: 0
@@ -149,7 +162,7 @@ proc connect*(req: ReqSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "REQ"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)
@@ -247,7 +260,7 @@ proc `bind`*(rep: RepSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "REP"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     ps.conn = zc
     if ps.authMech == "CURVE":
       curve.setCurveKeypair(zc, ps.authPubKey, ps.authSecKey)

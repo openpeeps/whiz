@@ -241,13 +241,17 @@ proc toStr*(data: openArray[byte]): string =
   if data.len > 0:
     copyMem(addr result[0], unsafeAddr data[0], data.len)
 
-template applyConnBatching*(ps, zc) =
-  ## Applies socket-level connection flags to a freshly set-up
-  ## ZmtpConnection. Currently: write batching (see `setBatching` on the
-  ## socket types) — coalesces floods into bulk writes instead of one
-  ## syscall per message. No-op unless the socket enabled it.
+template applyConnOpts*(ps, zc) =
+  ## Applies socket-level connection options to a freshly set-up
+  ## ZmtpConnection: write batching (`setBatching`) and kernel socket
+  ## buffer hints (`setSendBufferSize`/`setRecvBufferSize`). No-op unless
+  ## the socket enabled them.
   if ps.batchWrites:
     zc.conn.setBatching(true)
+  if ps.sndBufSize > 0:
+    zc.conn.setSendBufferSize(ps.sndBufSize)
+  if ps.rcvBufSize > 0:
+    zc.conn.setRecvBufferSize(ps.rcvBufSize)
 
 proc sendMultipart*(zc: ZmtpConnection; frames: openArray[seq[byte]]): bool {.discardable.} =
   ## Sends a multipart message. Every frame but the last carries ZmtpMore.

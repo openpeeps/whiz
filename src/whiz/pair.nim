@@ -18,6 +18,7 @@ type
   PairSocket* = ref object
     loop:       Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     server:     TcpServer
     conn*:       ZmtpConnection
@@ -102,6 +103,19 @@ proc setBatching*(pair: PairSocket; on: bool = true) =
   if pair.conn != nil:
     pair.conn.conn.setBatching(on)
 
+proc setSendBufferSize*(pair: PairSocket; bytes: int) =
+  ## Hints the kernel send-buffer size for current and future connections.
+  ## 0 (default) leaves the OS default/autotuning alone.
+  pair.sndBufSize = bytes
+  if pair.conn != nil:
+    pair.conn.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(pair: PairSocket; bytes: int) =
+  ## Hints the kernel receive-buffer size for current and future connections.
+  pair.rcvBufSize = bytes
+  if pair.conn != nil:
+    pair.conn.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(pair: PairSocket): int =
   ## Bytes queued in powpow write buffers for this connection (0 = drained).
   if pair.conn != nil: pair.conn.pendingBytes()
@@ -167,7 +181,7 @@ proc `bind`*(pair: PairSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = true, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     ps.conn = zc
     applySocketAuth(zc, ps)
 
@@ -212,7 +226,7 @@ proc connect*(pair: PairSocket; address: string; port: int = 0;
     let zc = initZmtpConnection(conn, asServer = false, mech)
     zc.socketType = "PAIR"
     conn.data = cast[pointer](zc)
-    applyConnBatching(ps, zc)
+    applyConnOpts(ps, zc)
     ps.conn = zc
     applySocketAuth(zc, ps)
 

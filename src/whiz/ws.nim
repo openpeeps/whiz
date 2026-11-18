@@ -59,6 +59,7 @@ type
   WsPairSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     wss: WsServer
     ws: WsConnection
@@ -99,6 +100,16 @@ proc setBatching*(s: WsPairSocket; on: bool = true) =
   s.batchWrites = on
   if s.zc != nil: s.zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsPairSocket; bytes: int) =
+  ## Hints the kernel send-buffer size for current and future connections.
+  s.sndBufSize = bytes
+  if s.zc != nil: s.zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsPairSocket; bytes: int) =
+  ## Hints the kernel receive-buffer size for current and future connections.
+  s.rcvBufSize = bytes
+  if s.zc != nil: s.zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsPairSocket): int =
   ## Bytes queued in the underlying WS/TCP write buffers (0 = drained).
   if s.ws != nil: s.ws.pendingBytes()
@@ -122,7 +133,7 @@ proc `bind`*(s: WsPairSocket; address: string; port: int;
       ws.closeWs(1000, "Only one connection allowed")
       return
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
-    applyConnBatching(s, zc)
+    applyConnOpts(s, zc)
     zc.socketType = "PAIR"
     ws.conn.data = cast[pointer](zc)
     s.ws = ws
@@ -151,7 +162,7 @@ proc connect*(s: WsPairSocket; address: string; port: int; path: string = "/";
         ws.closeWs(1000, "Only one connection allowed")
         return
       let zc = initZmtpConnection(ws.conn, asServer = false, "NULL", skipGreeting = true)
-      applyConnBatching(self, zc)
+      applyConnOpts(self, zc)
       zc.socketType = "PAIR"
       self.ws = ws
       self.conn = ws.conn
@@ -193,6 +204,7 @@ type
   WsPubSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     wss: WsServer
     subs: seq[WsSubscriber]
@@ -231,6 +243,16 @@ proc setBatching*(s: WsPubSocket; on: bool = true) =
   for sub in s.subs:
     if sub.zc != nil: sub.zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsPubSocket; bytes: int) =
+  s.sndBufSize = bytes
+  for sub in s.subs:
+    if sub.zc != nil: sub.zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsPubSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  for sub in s.subs:
+    if sub.zc != nil: sub.zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsPubSocket): int =
   var total = 0
   for sub in s.subs:
@@ -242,7 +264,7 @@ proc `bind`*(s: WsPubSocket; address: string; port: int;
   s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
-    applyConnBatching(s, zc)
+    applyConnOpts(s, zc)
     zc.socketType = "PUB"
     ws.conn.data = cast[pointer](zc)
     wsBridge(zc, ws)
@@ -274,6 +296,7 @@ type
   WsSubSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     ws: seq[WsConnection]
     zcs: seq[ZmtpConnection]
@@ -326,6 +349,16 @@ proc setBatching*(s: WsSubSocket; on: bool = true) =
   for zc in s.zcs:
     zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsSubSocket; bytes: int) =
+  s.sndBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsSubSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsSubSocket): int =
   var total = 0
   for w in s.ws:
@@ -339,7 +372,7 @@ proc connect*(s: WsSubSocket; address: string; port: int; path: string = "/";
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
       let zc = initZmtpConnection(ws.conn, asServer = false, "NULL", skipGreeting = true)
-      applyConnBatching(self, zc)
+      applyConnOpts(self, zc)
       zc.socketType = "SUB"
       self.ws.add(ws)
       self.zcs.add(zc)
@@ -384,6 +417,7 @@ type
   WsReqSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     ws: WsConnection
     zc: ZmtpConnection
@@ -422,6 +456,14 @@ proc setBatching*(s: WsReqSocket; on: bool = true) =
   s.batchWrites = on
   if s.zc != nil: s.zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsReqSocket; bytes: int) =
+  s.sndBufSize = bytes
+  if s.zc != nil: s.zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsReqSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  if s.zc != nil: s.zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsReqSocket): int =
   if s.ws != nil: s.ws.pendingBytes()
   elif s.zc != nil: s.zc.pendingBytes()
@@ -433,7 +475,7 @@ proc connect*(s: WsReqSocket; address: string; port: int; path: string = "/";
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
       let zc = initZmtpConnection(ws.conn, asServer = false, "NULL", skipGreeting = true)
-      applyConnBatching(self, zc)
+      applyConnOpts(self, zc)
       zc.socketType = "REQ"
       self.ws = ws
       self.conn = ws.conn
@@ -469,6 +511,7 @@ type
   WsRepSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     wss: WsServer
     ws: WsConnection
@@ -510,6 +553,14 @@ proc setBatching*(s: WsRepSocket; on: bool = true) =
   s.batchWrites = on
   if s.zc != nil: s.zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsRepSocket; bytes: int) =
+  s.sndBufSize = bytes
+  if s.zc != nil: s.zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsRepSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  if s.zc != nil: s.zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsRepSocket): int =
   if s.ws != nil: s.ws.pendingBytes()
   elif s.zc != nil: s.zc.pendingBytes()
@@ -523,7 +574,7 @@ proc `bind`*(s: WsRepSocket; address: string; port: int;
       ws.closeWs(1000, "Only one connection allowed")
       return
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
-    applyConnBatching(s, zc)
+    applyConnOpts(s, zc)
     zc.socketType = "REP"
     ws.conn.data = cast[pointer](zc)
     s.ws = ws
@@ -552,6 +603,7 @@ type
   WsPushSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     wss: WsServer
     ws: seq[WsConnection]
@@ -596,6 +648,16 @@ proc setBatching*(s: WsPushSocket; on: bool = true) =
   for zc in s.zcs:
     zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsPushSocket; bytes: int) =
+  s.sndBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsPushSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsPushSocket): int =
   var total = 0
   for w in s.ws:
@@ -607,7 +669,7 @@ proc `bind`*(s: WsPushSocket; address: string; port: int;
   s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
-    applyConnBatching(s, zc)
+    applyConnOpts(s, zc)
     zc.socketType = "PUSH"
     ws.conn.data = cast[pointer](zc)
     wsBridge(zc, ws)
@@ -646,7 +708,7 @@ proc connect*(s: WsPushSocket; address: string; port: int; path: string = "/";
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
       let zc = initZmtpConnection(ws.conn, asServer = false, "NULL", skipGreeting = true)
-      applyConnBatching(self, zc)
+      applyConnOpts(self, zc)
       zc.socketType = "PUSH"
       self.ws.add(ws)
       self.zcs.add(zc)
@@ -687,6 +749,7 @@ type
   WsPullSocket* = ref object
     loop: Loop
     ownsLoop: bool
+    sndBufSize, rcvBufSize: int
     batchWrites: bool
     wss: WsServer
     ws: seq[WsConnection]
@@ -728,6 +791,16 @@ proc setBatching*(s: WsPullSocket; on: bool = true) =
   for zc in s.zcs:
     zc.conn.setBatching(on)
 
+proc setSendBufferSize*(s: WsPullSocket; bytes: int) =
+  s.sndBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setSendBufferSize(bytes)
+
+proc setRecvBufferSize*(s: WsPullSocket; bytes: int) =
+  s.rcvBufSize = bytes
+  for zc in s.zcs:
+    zc.conn.setRecvBufferSize(bytes)
+
 proc pendingBytes*(s: WsPullSocket): int =
   var total = 0
   for w in s.ws:
@@ -739,7 +812,7 @@ proc `bind`*(s: WsPullSocket; address: string; port: int;
   s.wss = newWsServerWithOpts(s.loop, opts)
   s.wss.onOpen do (ws: WsConnection):
     let zc = initZmtpConnection(ws.conn, asServer = true, "NULL", skipGreeting = true)
-    applyConnBatching(s, zc)
+    applyConnOpts(s, zc)
     zc.socketType = "PULL"
     ws.conn.data = cast[pointer](zc)
     wsBridge(zc, ws)
@@ -781,7 +854,7 @@ proc connect*(s: WsPullSocket; address: string; port: int; path: string = "/";
   discard connectWs(s.loop, address, port, path,
     onOpen = proc(ws: WsConnection) {.closure.} =
       let zc = initZmtpConnection(ws.conn, asServer = false, "NULL", skipGreeting = true)
-      applyConnBatching(self, zc)
+      applyConnOpts(self, zc)
       zc.socketType = "PULL"
       self.ws.add(ws)
       self.zcs.add(zc)

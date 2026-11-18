@@ -164,6 +164,10 @@ all verified with `nimble benchVsZmq` and `nimble benchMem`:
 - **Single-send tiny frames.** Payloads ≤ 64B go out as one contiguous
   stack buffer + `send` instead of a 2-part `writev` (skips iovec setup).
   - pair_latency avg: 27.9 → **26.9μs** (~+4% round-trip rate)
+- **Socket buffer hints** (`setSendBufferSize`/`setRecvBufferSize`, opt-in,
+  applied to current and future connections). Pre-sizing SO_SNDBUF/SO_RCVBUF
+  skips part of the kernel autotune ramp on cold bursts (~+1–6% on a
+  single 30k×512B flood; sustained loads autotune on their own).
 
 Memory stays flat by construction: per-connection pools grow once to the
 largest frame then stay flat, and a repeated 20k-message flood retains
